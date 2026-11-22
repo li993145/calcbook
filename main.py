@@ -32,7 +32,7 @@ from ui_printpreview import PrintPreviewPane
 from core.highlighter import FormulaHighlighter, compute_runs, FCOLOR
 
 APP_NAME = "工程量计算书"
-APP_VER = "2.8.3"
+APP_VER = "2.9.0"
 FILE_EXT = '.gcls'          # 工程文件后缀（内容仍是 JSON，便于排查与迁移）
 
 # ---- 工程文件关联（让资源管理器把 .gcls 显示成软件图标）----
@@ -2885,6 +2885,7 @@ class MainWindow(QMainWindow):
                     ('表格字体', 'settings', self.font_setup, '', False),
                 ]),
                 ('计算书', [
+                    ('导入表格', 'open', self.import_table, '', True),
                     ('分类汇总', 'calc', self.data_summary, '', True),
                     ('数据列定义', 'settings', self.column_setup, '', False),
                     ('选项配置', 'settings', self.autosave_settings, '', False),
@@ -4170,6 +4171,61 @@ class MainWindow(QMainWindow):
         if added:
             msg += f'，已自动新增 {added} 行'
         self.status.showMessage(msg, 4000)
+
+    # ---------------- 导入表格文件（xlsx / csv / txt） ----------------
+    def import_table(self):
+        from ui_import import ImportTableDialog, read_table_file, trim_data
+        path, _ = QFileDialog.getOpenFileName(
+            self, '导入表格文件', '',
+            '表格文件 (*.xlsx *.csv *.txt);;Excel 工作簿 (*.xlsx);;'
+            'CSV 文件 (*.csv);;文本文件 (*.txt);;所有文件 (*)')
+        if not path:
+            return
+        sec = self.current_section
+        dlg = ImportTableDialog(self, self.project.columns,
+                                default_row=len(sec.rows) + 1, path=path)
+        if dlg.exec_() != QDialog.Accepted:
+            return
+        pairs = dlg.map_pairs()
+        src_rows = dlg.data_from()
+        tgt0 = dlg.target_row0()          # None=追加到末尾
+        if tgt0 is None:
+            tgt0 = len(sec.rows)
+        need = tgt0 + len(src_rows)
+        before_n = len(sec.rows)
+        self.push_undo('导入表格')
+        # 行数不够时自动在末尾补足空行
+        while len(sec.rows) < need:
+            sec.rows.append(Row())
+        added = len(sec.rows) - before_n
+        cols = self.project.columns
+        self._loading = True
+        n_cells = 0
+        for i, srow in enumerate(src_rows):
+            row = sec.rows[tgt0 + i]
+            for si, key in pairs:
+                val = srow[si].strip() if si < len(srow) else ''
+                if key == 'no_count':
+                    row.no_count = val in ('是', '√', 'Y', 'y', '1', 'true', 'True')
+                    n_cells += 1
+                    continue
+                if not any(c['key'] == key for c in cols):
+                    continue
+                if hasattr(row, key) and key != 'value':
+                    setattr(row, key, val)
+                else:
+                    row.custom[key] = val
+                n_cells += 1
+        self._loading = False
+        self.project.recalc()
+        self.refresh_table()
+        self._dirty = True
+        msg = f'已导入 {len(src_rows)} 行 × {len(pairs)} 列（共 {n_cells} 个单元格）'
+        if added:
+            msg += f'，已自动新增 {added} 行'
+        if tgt0:
+            msg += f'，写入位置：第 {tgt0 + 1} 行起'
+        self.status.showMessage(msg, 6000)
 
     # ---------------- 树节点操作（单项工程 / 单位工程 / 分部 / 分项 …） ----------------
     def _tree_section(self):
