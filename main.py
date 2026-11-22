@@ -32,7 +32,7 @@ from ui_printpreview import PrintPreviewPane
 from core.highlighter import FormulaHighlighter, compute_runs, FCOLOR
 
 APP_NAME = "工程量计算书"
-APP_VER = "2.8.0"
+APP_VER = "2.8.1"
 FILE_EXT = '.gcls'          # 工程文件后缀（内容仍是 JSON，便于排查与迁移）
 
 # ---- 工程文件关联（让资源管理器把 .gcls 显示成软件图标）----
@@ -1121,9 +1121,9 @@ class SummaryPanel(QFrame):
         self.btn_fold.setToolTip('收起分类汇总面板（工作区变宽）')
         self.btn_fold.setCursor(Qt.PointingHandCursor)
         self.btn_fold.setAutoRaise(True)
-        self.btn_fold.setFixedSize(20, 20)
+        self.btn_fold.setFixedSize(26, 26)
         self.btn_fold.setStyleSheet('QToolButton { border:1px solid #d5dbe2; border-radius:2px; '
-                                    'background:#fff; color:#3c6b9c; font-size:10pt; padding:0; }'
+                                    'background:#fff; color:#3c6b9c; font-size:12pt; padding:0; }'
                                     'QToolButton:hover { background:#e8f0fa; border-color:#9dbce0; }')
         self.btn_fold.clicked.connect(lambda: self.win.fold_summary(True))
         head.addWidget(self.btn_fold)
@@ -1133,7 +1133,7 @@ class SummaryPanel(QFrame):
         self.btn_max.setToolTip('放大分类汇总（隐藏主工作区）')
         self.btn_max.setCursor(Qt.PointingHandCursor)
         self.btn_max.setAutoRaise(True)
-        self.btn_max.setFixedSize(20, 20)
+        self.btn_max.setFixedSize(26, 26)
         self.btn_max.setStyleSheet(self.btn_fold.styleSheet())
         self.btn_max.clicked.connect(lambda: self.win.toggle_summary_max())
         head.addWidget(self.btn_max)
@@ -2009,10 +2009,10 @@ FUNCTION_GROUPS = [
         ('max', '最大值', 'max()', 1, 'max(1,2,3) = 3'),
         ('min', '最小值', 'min()', 1, 'min(1,2,3) = 1'),
         ('sum', '求和', 'sum()', 1, 'sum(1,2,3) = 6'),
+        ('avg', '求平均值', 'avg()', 1, 'avg(1,2,3) = 2'),
     ]),
-    ('常量与汇总', [
+    ('常量', [
         ('π', '圆周率', 'π', 0, 'π = 3.14159'),
-        ('XJ()', '子分部汇总', 'XJ()', 0, '汇总当前分部下所有子分部工程量'),
     ]),
 ]
 
@@ -2873,7 +2873,6 @@ class MainWindow(QMainWindow):
             ],
             '公式编辑': [
                 ('公式', [
-                    ('写入公式', 'calc', self.apply_formula_help, 'Ctrl+Enter', True),
                     ('插入函数', 'settings', self.show_functions, '', True),
                     ('查看公式', 'doc', self.view_formula, '', False),
                     ('重算', 'calc', self.recalc_all, 'F9', True),
@@ -2896,8 +2895,6 @@ class MainWindow(QMainWindow):
                 ('打印', [
                     ('打印', 'print', self.print_report, 'Ctrl+P', True),
                     ('打印预览', 'print', self.print_preview, '', True),
-                    ('设置打印区域', 'print', self.set_print_area, '', True),
-                    ('清除打印区域', 'print', self.clear_print_area, '', False),
                     ('页面设置', 'settings', self.page_setup, '', True),
                 ]),
             ],
@@ -3617,14 +3614,14 @@ class MainWindow(QMainWindow):
         该行会红色提示“未定义的常量：@xxx”。</p>
         <p><b>4. 函数</b>：ceil 向上取整、floor 向下取整、sqr 平方、sqrt 开平方、round 四舍五入、
         power(x,n) 幂、pi/π 圆周率、radians 角度转弧度、du 弧度转角度、
-        abs 绝对值、max、min、sum、sin、cos、tan。点工具栏或快捷栏的
+        abs 绝对值、max、min、sum、avg 平均值、sin、cos、tan。点工具栏或快捷栏的
         <b>“插入函数”</b> 会弹出函数面板，点函数名即插入 <code>函数名()</code>，光标停在括号内；
         面板里每个函数都有写法提示（鼠标停留可看）。</p>
         <p><b>5. 括号与备注</b>：F4 公式前插入 <code>()</code>、F5 插入点插入 <code>()</code>、
         F6 插入点插入 <code>[]</code>、F7 末尾追加 <code>[]</code>；这四个键在表格单元格里
         直接打字时也生效。<code>[]</code> 里写的文字按备注处理，不参与计算，
         如 <code>4×9.6[柱基]</code>。</p>
-        <p><b>6. 汇总</b>：<code>XJ()</code> 汇总当前分部下所有子分部工程量；每分部自动“小计”。</p>
+        <p><b>6. 汇总</b>：每分部自动“小计”。</p>
         <p><b>7. 度分秒</b>：34°56′30″ 可直接计算。</p>
         <p><b>8. 开平方</b>：√ 直接参与运算，<code>√9</code>=3、<code>√(3+4)</code>、<code>2×√9</code>、
         <code>√(9+√16)</code> 均可；也可写 sqrt(9)。</p>
@@ -4661,6 +4658,9 @@ class MainWindow(QMainWindow):
         menu.addAction('清除填充', self.clear_fill)
         menu.addSeparator()
         menu.addAction('标记为不计', self.toggle_no_count)
+        menu.addSeparator()
+        menu.addAction('设置打印区域（仅打印选中部分）', self.set_print_area)
+        menu.addAction('清除打印区域（恢复打印全部）', self.clear_print_area)
         menu.exec_(self.table.mapToGlobal(pos))
 
     def row_menu(self, pos):
