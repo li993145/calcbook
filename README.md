@@ -77,8 +77,7 @@
 
 下载 `CalcBook-v2.8.0.exe`（约 56MB），双击运行，免安装：
 
-- **Gitee 仓库直接下载（推荐国内用户）**：<https://gitee.com/li993145/calcbook/raw/main/CalcBook-v2.8.0.exe>
-- [Gitee Release](https://gitee.com/li993145/calcbook/releases/tag/v2.8.0)
+- [Gitee Release（推荐国内用户，点附件下载）](https://gitee.com/li993145/calcbook/releases/tag/v2.8.0)
 - [GitHub Release](https://github.com/li993145/calcbook/releases/tag/v2.8.0)
 
 > 本版本更新明细见 [RELEASE_NOTES_v2.8.0.md](RELEASE_NOTES_v2.8.0.md)。
