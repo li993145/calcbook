@@ -32,7 +32,7 @@ from ui_printpreview import PrintPreviewPane
 from core.highlighter import FormulaHighlighter, compute_runs, FCOLOR
 
 APP_NAME = "工程量计算书"
-APP_VER = "2.8.2"
+APP_VER = "2.8.3"
 FILE_EXT = '.gcls'          # 工程文件后缀（内容仍是 JSON，便于排查与迁移）
 
 # ---- 工程文件关联（让资源管理器把 .gcls 显示成软件图标）----
@@ -486,13 +486,11 @@ class LiveSyncDelegate(QStyledItemDelegate):
                            and cur.isValid() and index.column() == cur.column())
         except Exception:
             return None
+        if not (row_hit or col_hit):
+            return None
         if row_hit and col_hit:
-            return (QColor('#2f7de0'), 75)       # 行列交叉：稍深的蓝
-        if row_hit:
-            return (QColor('#f5d000'), 45)       # 当前行：浅黄
-        if col_hit:
-            return (QColor('#2f7de0'), 40)       # 当前列：浅蓝
-        return None
+            return (QColor('#2f7de0'), 75)       # 行列交叉：稍深
+        return (QColor('#2f7de0'), 40)           # 当前行 / 当前列：同一颜色
 
     def _overlay_hilite(self, painter, option, index):
         """在单元格绘制完成后叠加半透明高亮色块（不动 QStyle 内部状态，最安全）。"""
@@ -777,7 +775,7 @@ class QuickScroll(QScrollArea):
 class ConstGrid(QTableWidget):
     """常量框：三列（常量代码 | 值 | 说明），双击就地改，可自由增删。
 
-    对照兔兔软件：框上方是“新建常量 / 删除 / 导出常量”；
+    框上方是“新建常量 / 删除 / 导出常量”；
     V2.4 起不再内置任何常量（钢筋单重只作模板），全部由使用者自己定义。
     """
 
@@ -1084,7 +1082,7 @@ def natural_key(text):
 
 
 class SummaryPanel(QFrame):
-    """右侧分类汇总面板（放在兔兔“图片/备注”框的位置）。
+    """右侧分类汇总面板。
 
     可按 编号 / 项目名称 / 部位 / 分部 / 单位 把计算数据分类合计，
     结果可直接导出 Excel 或复制到剪贴板。
@@ -2850,7 +2848,7 @@ class MainWindow(QMainWindow):
         cv.addWidget(self.title_strip, 0)
         self.update_title()
 
-        # ===== Ribbon 工具栏（仿兔兔）=====
+        # ===== Ribbon 工具栏 =====
         sections = {
             '计算书编辑': [
                 ('文件', [
@@ -2962,7 +2960,7 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(page1, '计算书编辑')
 
         # 左导航 + 右（公式栏 + 表格）左右分栏：
-        # 导航栏从工作区顶部开始，公式辅助栏的左边与表格左边严格对齐（仿兔兔框体布置）
+        # 导航栏从工作区顶部开始，公式辅助栏的左边与表格左边严格对齐
         main_split = QSplitter(Qt.Horizontal)
         # 三块之间只用一条 1px 细线分隔（省出横向空间给工作区）
         main_split.setHandleWidth(1)
@@ -2970,14 +2968,14 @@ class MainWindow(QMainWindow):
         main_split.setStyleSheet('QSplitter::handle { background:#dde3ea; }')
         v1.addWidget(main_split, 1)
 
-        # 公式辅助输入栏（兔兔位置：表格上方；可拖动分隔条调节高度）
+        # 公式辅助输入栏（表格上方；可拖动分隔条调节高度）
         form_frame = QFrame()
         form_frame.setStyleSheet('background:#f0f0f0; border:1px solid #d8d8d8;')
         form_v = QVBoxLayout(form_frame)
         form_v.setContentsMargins(4, 2, 4, 2)
         form_v.setSpacing(2)
 
-        # —— 兔兔式快捷操作链接行 ——
+        # —— 快捷操作链接行 ——
         quick_bar = QFrame()
         quick_bar.setStyleSheet('QFrame { background:#eef2f7; border-bottom:1px solid #d6dbe1; }')
         qb = QHBoxLayout(quick_bar)
@@ -3095,9 +3093,11 @@ class MainWindow(QMainWindow):
         self.tree.setHeaderLabels(['名称', '层级'])
         self.tree.setMinimumWidth(200)
         th = self.tree.header()
-        th.setStretchLastSection(False)      # 否则“层级”列会被强行拉伸，名称列反被压窄
-        th.setSectionResizeMode(0, QHeaderView.Stretch)
-        th.setSectionResizeMode(1, QHeaderView.Fixed)
+        # 分隔线可手动拖动：名称列 Interactive，层级列吃掉剩余宽度
+        th.setStretchLastSection(True)
+        th.setSectionResizeMode(0, QHeaderView.Interactive)
+        th.setSectionResizeMode(1, QHeaderView.Interactive)
+        self.tree.setColumnWidth(0, 150)
         self.tree.setColumnWidth(1, 84)
         # 导航栏（含表头）统一常规字重，不用加粗
         self.tree.setStyleSheet('QHeaderView::section { font-weight: 400; }')
@@ -3126,7 +3126,7 @@ class MainWindow(QMainWindow):
         cbv = QVBoxLayout(const_box)
         cbv.setContentsMargins(0, 0, 0, 0)
         cbv.setSpacing(1)
-        # 对照兔兔：常量框上方一排“新建常量 / 删除 / 导出常量”
+        # 常量框上方一排“新建常量 / 删除 / 导出常量”
         chead = QHBoxLayout()
         chead.setContentsMargins(4, 1, 2, 1)
         chead.setSpacing(4)
@@ -3307,7 +3307,7 @@ class MainWindow(QMainWindow):
         return b
 
     def _link_btn(self, text, tip, slot, icon=''):
-        """兔兔式文字按钮（常量框上方“新建常量 / 删除 / 导出常量”）。"""
+        """文字按钮（常量框上方“新建常量 / 删除 / 导出常量”）。"""
         b = QToolButton(self)
         b.setText(('%s %s' % (icon, text)) if icon else text)
         b.setToolTip(tip)
@@ -3691,7 +3691,7 @@ class MainWindow(QMainWindow):
         <li><b>自动保存与备份</b>：「计算书」组「选项配置」里可设自动保存开关、间隔（1–120 分钟）和备份目录；到点时若工程有改动会写回主文件，并在备份目录生成带时间戳的副本。</li>
         <li><b>工程文件</b>：保存为 <code>.gcls</code>（内容仍是 JSON 文本，便于排查），包含所有计算书、分部结构、公式、备注、常量、列定义、填充色与页面设置；旧版 .json 工程也能打开。软件启动会自动打开上次使用的工程。</li>
         <li><b>常用快捷键</b>：Ctrl+N 新建、Ctrl+O 打开、Ctrl+S 保存、Ctrl+P 打印、Ctrl+F 查找、Ctrl+C / X / V 复制 / 剪切 / 粘贴、Delete 清除单元格内容、Insert 插入行、Ctrl+Z / Ctrl+Y 撤销 / 恢复、F4–F7 插入括号、F9 重算、Ctrl+Enter 确认公式。</li>
-        <li><b>行 / 列高亮</b>：表格上方快捷操作行的「选中行高亮」「选中列高亮」两个开关——当前行加淡黄底纹、当前列加淡蓝底纹，可同时开（交叉处稍深）；只加底纹，不影响框选、删除与粘贴。</li>
+        <li><b>行 / 列高亮</b>：表格上方快捷操作行的「选中行高亮」「选中列高亮」两个开关——当前行、当前列加同色淡蓝底纹，可同时开（交叉处稍深）；只加底纹，不影响框选、删除与粘贴。</li>
         <li><b>表格字体</b>：功能区「计算书编辑 → 格式 → 表格字体」，字体类型来自电脑系统字库（宋体、黑体、仿宋、楷体等），字号 6–24；确定后表格行高 / 列宽按新字体自动重排，设置会记住，下次启动自动恢复。</li>
         </ul>
         """
@@ -3740,15 +3740,6 @@ class MainWindow(QMainWindow):
                 p.setExpanded(True)
                 p = p.parent()
             self.tree.setCurrentItem(target)
-        # 层级列宽度按层级名长度自适应，避免“单项工程/单位工程”被截断
-        try:
-            fm = QFontMetrics(self.tree.font())
-            measure = getattr(fm, 'horizontalAdvance', None) or fm.width
-            names = list(proj.levels or []) + ['层级']
-            w = max(measure(n) for n in names) + 26
-            self.tree.setColumnWidth(1, max(72, min(120, int(w))))
-        except Exception:
-            pass
         self.update_constants_display()
         self._loading = False
 
@@ -3838,7 +3829,7 @@ class MainWindow(QMainWindow):
             if hi is not None and cd['key'] == 'unit':
                 hi.setToolTip('双击（或选中后再点一下）弹出常用单位下拉框，可直接选择\n'
                               'm/m2/m3/kg 保留2位、t 保留3位、个/块/套/处/台/组 取整')
-        # 应用列宽（参照兔兔比例）。setSectionsMovable 下按逻辑索引设置宽度
+        # 应用列宽（默认比例）。setSectionsMovable 下按逻辑索引设置宽度
         hh = self.table.horizontalHeader()
         for j, cd in enumerate(cols):
             w = int(cd.get('width', 100))
@@ -4666,6 +4657,9 @@ class MainWindow(QMainWindow):
                 self.table.selectionModel().select(hit_idx, QItemSelectionModel.ClearAndSelect)
                 self.table.setCurrentIndex(hit_idx)
         menu = QMenu(self)
+        menu.addAction('复制选中单元格  (Ctrl+C)', self.copy_rows)
+        menu.addAction('全选表格', self.table.selectAll)
+        menu.addSeparator()
         menu.addAction('在上方插入行', self.insert_row_above)
         menu.addAction('在下方插入行', self.insert_row_below)
         menu.addSeparator()
@@ -5309,16 +5303,28 @@ class MainWindow(QMainWindow):
         else:
             self.apply_fill('', 'cell')
 
-    # ---------------- 兔兔工具条补充功能 ----------------
+    # ---------------- 工具条补充功能 ----------------
     def show_recent(self):
-        """显示最近打开的工程列表。"""
+        """显示最近打开的工程列表（底部带“清除最近打开列表”）。"""
         if not self.recent:
             QMessageBox.information(self, APP_NAME, '暂无最近打开的工程。')
             return
         menu = QMenu(self)
         for path in self.recent:
             menu.addAction(os.path.basename(path), lambda p=path: self.open_project(p))
+        menu.addSeparator()
+        menu.addAction('清除最近打开列表', self.clear_recent)
         menu.exec_(self.cursor().pos())
+
+    def clear_recent(self):
+        """清空最近打开列表并持久化。"""
+        n = len(self.recent)
+        if n == 0:
+            return
+        self.recent = []
+        self._set_setting('recent', [])
+        self.update_recent_menu()
+        self.status.showMessage('已清除最近打开列表（%d 条）' % n, 3000)
 
     def choose_backup_dir(self):
         """选择自动保存备份目录。"""
@@ -6371,7 +6377,7 @@ class MainWindow(QMainWindow):
                 state += '，备份目录：' + self.autosave_dir
             self.status.showMessage('自动保存' + state, 4000)
 
-    # ---------------- 兔兔其他功能 ----------------
+    # ---------------- 其他功能 ----------------
     def view_formula(self):
         """查看当前分部所有公式。"""
         rows = self.current_section.rows
@@ -6609,7 +6615,7 @@ class MainWindow(QMainWindow):
 
 
 def main():
-    # 与兔兔（Delphi/VCL 程序）一致：不做 Qt 高 DPI 自动缩放，
+    # 与 Delphi/VCL 程序行为一致：不做 Qt 高 DPI 自动缩放，
     # 由 Windows 统一做位图虚拟化，保证在不同缩放比例的屏幕上控件尺寸一致，
     # 不会出现"图标文字随屏幕变化、忽大忽小"的问题。
 
