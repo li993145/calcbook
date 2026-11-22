@@ -1,0 +1,234 @@
+{
+ "id": "demo00000001",
+ "name": "示例工程",
+ "created": "2026-11-22T11:07:08",
+ "modified": "2026-11-22T11:08:39",
+ "info": {},
+ "constants": {},
+ "columns": [
+  {
+   "key": "code",
+   "title": "编号",
+   "width": 120,
+   "builtin": true
+  },
+  {
+   "key": "name",
+   "title": "项目名称",
+   "width": 200,
+   "builtin": true
+  },
+  {
+   "key": "part",
+   "title": "部位",
+   "width": 130,
+   "builtin": true
+  },
+  {
+   "key": "formula",
+   "title": "计算公式",
+   "width": 480,
+   "builtin": true
+  },
+  {
+   "key": "unit",
+   "title": "单位",
+   "width": 60,
+   "builtin": true
+  },
+  {
+   "key": "value",
+   "title": "工程量",
+   "width": 100,
+   "builtin": true
+  },
+  {
+   "key": "remark",
+   "title": "备注",
+   "width": 160,
+   "builtin": true
+  },
+  {
+   "key": "no_count",
+   "title": "不计",
+   "width": 50,
+   "builtin": true
+  }
+ ],
+ "report": {
+  "title": "示例工程 工程量计算书",
+  "header": "",
+  "footer": "第 &P 页",
+  "margin": 1.9,
+  "halign": "left",
+  "valign": "center",
+  "paper": {
+   "name": "A4",
+   "w": 210.0,
+   "h": 297.0
+  },
+  "margins": {
+   "top": 0.6,
+   "bottom": 1.9,
+   "left": 1.9,
+   "right": 1.9
+  }
+ },
+ "books": [
+  {
+   "id": "book000001",
+   "name": "单项工程1",
+   "expanded": true,
+   "rows": [],
+   "children": [
+    {
+     "id": "sec0000001",
+     "name": "单位工程1",
+     "expanded": true,
+     "rows": [
+      {
+       "id": "row111",
+       "code": "1-1-1",
+       "name": "平整场地",
+       "part": "室外",
+       "formula": "20.00*15.00",
+       "unit": "m2",
+       "value": 300.0,
+       "remark": "",
+       "no_count": false,
+       "fill": "",
+       "cell_fill": {}
+      },
+      {
+       "id": "row112",
+       "code": "1-1-2",
+       "name": "挖一般土方",
+       "part": "室外",
+       "formula": "(20.00+15.00)*2*0.30*0.30",
+       "unit": "m3",
+       "value": 6.3,
+       "remark": "",
+       "no_count": false,
+       "fill": "",
+       "cell_fill": {}
+      }
+     ],
+     "children": [
+      {
+       "id": "sec0000002",
+       "name": "分部工程1",
+       "expanded": true,
+       "rows": [
+        {
+         "id": "row1121",
+         "code": "1-1-2-1",
+         "name": "平整场地",
+         "part": "室外",
+         "formula": "20.00*15.00",
+         "unit": "m2",
+         "value": 300.0,
+         "remark": "",
+         "no_count": false,
+         "fill": "",
+         "cell_fill": {}
+        },
+        {
+         "id": "row1122",
+         "code": "1-1-2-2",
+         "name": "余方弃置",
+         "part": "室外",
+         "formula": "6.30*1.15",
+         "unit": "m3",
+         "value": 7.25,
+         "remark": "运距 5km",
+         "no_count": false,
+         "fill": "",
+         "cell_fill": {}
+        }
+       ],
+       "children": []
+      }
+     ]
+    }
+   ]
+  }
+ ],
+ "root": {
+  "id": "book000001",
+  "name": "单项工程1",
+  "expanded": true,
+  "rows": [],
+  "children": [
+   {
+    "id": "sec0000001",
+    "name": "单位工程1",
+    "expanded": true,
+    "rows": [
+     {
+      "id": "row111",
+      "code": "1-1-1",
+      "name": "平整场地",
+      "part": "室外",
+      "formula": "20.00*15.00",
+      "unit": "m2",
+      "value": 300.0,
+      "remark": "",
+      "no_count": false,
+      "fill": "",
+      "cell_fill": {}
+     },
+     {
+      "id": "row112",
+      "code": "1-1-2",
+      "name": "挖一般土方",
+      "part": "室外",
+      "formula": "(20.00+15.00)*2*0.30*0.30",
+      "unit": "m3",
+      "value": 6.3,
+      "remark": "",
+      "no_count": false,
+      "fill": "",
+      "cell_fill": {}
+     }
+    ],
+    "children": [
+     {
+      "id": "sec0000002",
+      "name": "分部工程1",
+      "expanded": true,
+      "rows": [
+       {
+        "id": "row1121",
+        "code": "1-1-2-1",
+        "name": "平整场地",
+        "part": "室外",
+        "formula": "20.00*15.00",
+        "unit": "m2",
+        "value": 300.0,
+        "remark": "",
+        "no_count": false,
+        "fill": "",
+        "cell_fill": {}
+       },
+       {
+        "id": "row1122",
+        "code": "1-1-2-2",
+        "name": "余方弃置",
+        "part": "室外",
+        "formula": "6.30*1.15",
+        "unit": "m3",
+        "value": 7.25,
+        "remark": "运距 5km",
+        "no_count": false,
+        "fill": "",
+        "cell_fill": {}
+       }
+      ],
+      "children": []
+     }
+    ]
+   }
+  ]
+ },
+ "version": 4
+}

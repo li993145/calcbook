@@ -1,0 +1,26 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+
+# ---- PyInstaller 构建产物 ----
+build/
+dist/
+
+# ---- 用户数据（工程文件 / 导出结果），不上传 ----
+*.gcls
+*.xlsx
+*.xls
+*.csv
+# 例外：仓库自带的合成示例工程
+!samples/*.gcls
+
+# ---- 运行时 ----
+*.log
+.workbuddy_run.log
+Thumbs.db
+desktop.ini
+.DS_Store
