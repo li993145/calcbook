@@ -144,6 +144,13 @@ def _log(x, base=None):
     return math.log(x, base)
 
 
+def _avg(*args):
+    """求平均值：avg(1,2,3) = 2；无参数时返回 0。"""
+    if not args:
+        return 0
+    return sum(args) / len(args)
+
+
 FUNCTIONS = {
     'ceil': math.ceil,
     'floor': math.floor,
@@ -160,8 +167,8 @@ FUNCTIONS = {
     'sin': math.sin,
     'cos': math.cos,
     'tan': math.tan,
-    'xj': None,   # 由 context 提供汇总回调
     'sum': sum,
+    'avg': _avg,
 }
 
 CONSTANTS = {
