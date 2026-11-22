@@ -13,7 +13,7 @@ from PyQt5.QtWidgets import (
     QGridLayout, QRadioButton, QButtonGroup, QColorDialog, QSizePolicy,
     QAbstractItemDelegate, QAbstractButton, QCheckBox, QStyle,
     QStyleOptionViewItem, QStyleOptionButton, QListWidget, QListWidgetItem,
-    QScrollArea
+    QScrollArea, QGroupBox
 )
 from PyQt5.QtCore import (Qt, QSettings, QMimeData, QEvent, QTimer, QUrl, QRectF, QPointF,
                           QPoint, QSizeF, QRect, pyqtSignal, QObject)
@@ -422,21 +422,123 @@ class LiveSyncDelegate(QStyledItemDelegate):
         key = self.win.col_key(index.column())
         if key not in ('no_count', 'formula'):
             return super().paint(painter, option, index)
-        opt = QStyleOptionViewItem(option)
-        self.initStyleOption(opt, index)
-        text = opt.text or ''
-        opt.text = ''
-        if key == 'no_count':
-            opt.features &= ~QStyleOptionViewItem.HasCheckIndicator
-        style = opt.widget.style() if opt.widget is not None else QApplication.style()
-        # 先画背景 / 选中态 / 网格（不带文字与勾选框）
-        painter.save()
-        style.drawControl(QStyle.CE_ItemViewItem, opt, painter, opt.widget)
-        painter.restore()
-        if key == 'no_count':
-            self._paint_check(painter, opt, index, style)
-        else:
-            self._paint_formula(painter, opt, text, index)
+        try:
+            opt = QStyleOptionViewItem(option)
+            self.initStyleOption(opt, index)
+            text = opt.text or ''
+            opt.text = ''
+            if key == 'no_count':
+                opt.features &= ~QStyleOptionViewItem.HasCheckIndicator
+            style = opt.widget.style() if opt.widget is not None else QApplication.style()
+            # 先画背景 / 选中态 / 网格（不带文字与勾选框）
+            painter.save()
+            style.drawControl(QStyle.CE_ItemViewItem, opt, painter, opt.widget)
+            painter.restore()
+            if key == 'no_count':
+                self._paint_check(painter, opt, index, style)
+            else:
+                self._paint_formula(painter, opt, text, index)
+        except Exception:
+            # 槽函数里未捕获异常会让 PyQt5 直接 qFatal（表现为 exe 闪退）
+            try:
+                log_exception('单元格绘制')
+                super().paint(painter, option, index)
+            except Exception:
+                pass
+
+    def sizeHint(self, option, index):
+        """公式列按当前列宽折行后的真实高度，resizeRowsToContents() 用它撑高行。"""
+        if self.win.col_key(index.column()) != 'formula':
+            return super().sizeHint(option, index)
+        base = super().sizeHint(option, index)
+        try:
+            opt = QStyleOptionViewItem(option)
+            self.initStyleOption(opt, index)
+            font = QFont(self.win.table.font())
+            lines = self._wrap_formula(opt.text or '', max(40, option.rect.width() - 9), font)
+            need = len(lines) * QFontMetrics(font).height() + 8
+            base.setHeight(int(max(30, min(300, need))))
+        except Exception:
+            log_exception('公式行高计算')
+        return base
+
+    # ---------- 公式折行排版（颜色分词 + 自动换行） ----------
+    @staticmethod
+    def _char_kinds(text):
+        """逐字颜色类别。compute_runs 会跳过空格/字母等无类别字符，这里补齐为 None。"""
+        kinds = [None] * len(text)
+        for start, length, kind in compute_runs(text):
+            for i in range(start, min(len(text), start + length)):
+                kinds[i] = kind
+        return kinds
+
+    @staticmethod
+    def _formula_tokens(text):
+        """切成 (片段, 颜色类别)：中文/符号可逐字断行，ASCII 单词尽量不断开。"""
+        kinds = LiveSyncDelegate._char_kinds(text)
+        tokens = []
+        buf, cur = '', None
+
+        def flush():
+            nonlocal buf, cur
+            if buf:
+                tokens.append((buf, cur))
+                buf, cur = '', None
+
+        for ch, kind in zip(text, kinds):
+            if ch == '\n':
+                flush()
+                tokens.append(('\n', kind))
+                continue
+            word_char = ch.isascii() and (ch.isalnum() or ch in '._')
+            if word_char and (not buf or cur == kind):
+                buf += ch
+                cur = kind
+            else:
+                flush()
+                if word_char:
+                    buf, cur = ch, kind
+                else:
+                    tokens.append((ch, kind))
+        flush()
+        return tokens
+
+    def _wrap_formula(self, text, max_width, base_font):
+        """按当前列宽折成多行：[[(片段, 颜色类别), ...], ...]。"""
+        fonts, fms = {}, {}
+
+        def fms_for(kind):
+            bold = kind in ('op', 'bracket', 'super')
+            if bold not in fonts:
+                f = QFont(base_font)
+                f.setBold(bold)
+                fonts[bold] = f
+                fms[bold] = QFontMetrics(f)
+            return fonts[bold], fms[bold]
+
+        lines, used = [[]], 0.0
+        for tok, kind in self._formula_tokens(text or ''):
+            if tok == '\n':
+                lines.append([])
+                used = 0.0
+                continue
+            _f, fm = fms_for(kind)
+            w = float(fm.horizontalAdvance(tok))
+            if used + w > max_width and lines[-1]:
+                lines.append([])
+                used = 0.0
+            if w > max_width and len(tok) > 1:
+                for ch in tok:
+                    cw = float(fm.horizontalAdvance(ch))
+                    if used + cw > max_width and lines[-1]:
+                        lines.append([])
+                        used = 0.0
+                    lines[-1].append((ch, kind))
+                    used += cw
+            else:
+                lines[-1].append((tok, kind))
+                used += w
+        return lines
 
     def _paint_check(self, painter, opt, index, style):
         """把勾选框画在单元格正中央。"""
@@ -454,44 +556,45 @@ class LiveSyncDelegate(QStyledItemDelegate):
         painter.restore()
 
     def _paint_formula(self, painter, opt, text, index):
-        """按与公式辅助框一致的配色绘制公式单元格。"""
+        """按当前单元格宽高自动折行绘制，配色与公式辅助框完全一致。"""
         if not text:
             return
         base = QFont(self.win.table.font())
+        fm0 = QFontMetrics(base)
         rect = opt.rect.adjusted(5, 1, -3, -1)
-        if rect.width() <= 4:
+        if rect.width() <= 4 or rect.height() <= 4:
             return
         # 有错误时整行公式标红（与原来 setForeground 的行为一致）
         fg = index.data(Qt.ForegroundRole)
         err_color = None
         if isinstance(fg, QBrush) and fg.color().name().lower() == '#c00000':
             err_color = fg.color()
-        fm = QFontMetrics(base)
-        y = rect.top() + (rect.height() - fm.height()) // 2 + fm.ascent()
-        x = rect.left()
-        right = rect.right()
+        lines = self._wrap_formula(text, rect.width(), base)
+        line_h = fm0.height()
+        total = len(lines) * line_h
+        # 行高够就垂直居中；不够则从顶部显示（超出的由 clip 裁掉）
+        y = rect.top() + (max(0, rect.height() - total) // 2) + fm0.ascent()
         painter.save()
         painter.setClipRect(rect)
         fonts = {}
-        for start, length, kind in compute_runs(text):
-            seg = text[start:start + length]
-            bold = kind in ('op', 'bracket', 'super')
-            f = fonts.get(bold)
-            if f is None:
-                f = QFont(base)
-                f.setBold(bold)
-                fonts[bold] = f
-            painter.setFont(f)
-            painter.setPen(err_color if err_color is not None else QColor(FCOLOR.get(kind, '#000000')))
-            w = QFontMetrics(f).horizontalAdvance(seg)
-            if x + w > right:
-                rest = right - x
-                if rest > 2:
-                    painter.drawText(x, y, QFontMetrics(f).elidedText(seg, Qt.ElideRight, rest))
-                x = right + 1
-                break
-            painter.drawText(x, y, seg)
-            x += w
+        for line in lines:
+            x = float(rect.left())
+            for seg, kind in line:
+                bold = kind in ('op', 'bracket', 'super')
+                f = fonts.get(bold)
+                if f is None:
+                    f = QFont(base)
+                    f.setBold(bold)
+                    fonts[bold] = f
+                painter.setFont(f)
+                painter.setPen(err_color if err_color is not None
+                               else QColor(FCOLOR.get(kind, '#000000')))
+                w = QFontMetrics(f).horizontalAdvance(seg)
+                if x + w > rect.right() + 1:
+                    break
+                painter.drawText(int(x), int(y), seg)
+                x += w
+            y += line_h
         painter.restore()
 
     def editorEvent(self, event, model, option, index):
@@ -934,11 +1037,26 @@ class SummaryPanel(QFrame):
         head.addWidget(self.btn_fold)
         v.addLayout(head)
 
+        mode_row = QHBoxLayout()
+        mode_row.setSpacing(4)
         self.mode = QComboBox()
         for key, label in self.MODES:
             self.mode.addItem(label, key)
-        self.mode.setToolTip('按哪个字段把计算数据分类汇总')
-        v.addWidget(self.mode)
+        self.mode.setToolTip('按哪个字段把计算数据分类汇总（单条件模式）')
+        mode_row.addWidget(self.mode, 1)
+        self.btn_multi = QPushButton('多条件…')
+        self.btn_multi.setToolTip('多字段分组 + 多条筛选条件')
+        self.btn_multi.setStyleSheet('QPushButton { padding:3px 6px; font-size:9pt; }')
+        self.btn_multi.clicked.connect(self.open_multi_dialog)
+        mode_row.addWidget(self.btn_multi)
+        self.btn_clear_multi = QPushButton('单条件')
+        self.btn_clear_multi.setToolTip('清除多条件，恢复按上方方式汇总')
+        self.btn_clear_multi.setStyleSheet('QPushButton { padding:3px 6px; font-size:9pt; }')
+        self.btn_clear_multi.setVisible(False)
+        self.btn_clear_multi.clicked.connect(self.clear_multi)
+        mode_row.addWidget(self.btn_clear_multi)
+        v.addLayout(mode_row)
+        self.multi = None                 # None=单条件；dict=多字段/多筛选
 
         self.only_cur = QCheckBox('仅当前分部（含下级）')
         self.only_cur.setToolTip('勾选后只汇总左侧选中的分部；不勾选汇总全部计算书')
@@ -982,7 +1100,7 @@ class SummaryPanel(QFrame):
             bar.addWidget(b)
         v.addLayout(bar)
 
-        self.mode.currentIndexChanged.connect(lambda _i: self.refresh())
+        self.mode.currentIndexChanged.connect(lambda _i: self.clear_multi())
         self.only_cur.stateChanged.connect(lambda _s: self.refresh())
 
     # ---------------- 汇总表的行列操作（与工作区表格一致） ----------------
@@ -1110,45 +1228,115 @@ class SummaryPanel(QFrame):
         return self.mode.currentData() or 'code'
 
     def mode_label(self):
+        if self.multi:
+            names = [self.MODE_COL.get(f, f) for f in self.multi['fields']]
+            label = '多条件（%s）' % '+'.join(names)
+            if self.multi.get('filters'):
+                label += '·%d筛选' % len(self.multi['filters'])
+            return label
         return self.mode.currentText()
 
+    def fields(self):
+        """当前分组字段列表：单条件 1 个，多条件可多个。"""
+        if self.multi:
+            return list(self.multi['fields'])
+        return [self.mode_key()]
+
+    def show_unit_col(self):
+        return 'unit' not in self.fields()
+
+    def headers(self):
+        names = [self.MODE_COL.get(f, f) for f in self.fields()]
+        if self.show_unit_col():
+            names.append('单位')
+        return names + ['合计', '行数']
+
+    @staticmethod
+    def row_field(row, section, key):
+        """取一行在指定字段上的显示值（与单条件模式口径完全一致）。"""
+        if key == 'section':
+            return section.name or '（未命名分部）'
+        v = getattr(row, key, '')
+        text = str(v or '').strip()
+        if text:
+            return text
+        return {'code': '（无编号）', 'name': '（未命名）',
+                'part': '（无部位）', 'unit': '（无单位）'}.get(key, '（空）')
+
+    def pass_filters(self, row, section):
+        """多条件模式的筛选：每条条件按 字段/关系/值 判断，再按 全部/任一 合并。"""
+        multi = self.multi
+        if not multi or not multi.get('filters'):
+            return True
+        results = []
+        for field, op, value in multi['filters']:
+            text = self.row_field(row, section, field)
+            val = (value or '').strip()
+            if op == 'contains':
+                ok = bool(val) and val in text
+            elif op == 'not_contains':
+                ok = not val or val not in text
+            elif op == 'eq':
+                ok = text == val
+            elif op == 'ne':
+                ok = text != val
+            elif op == 'empty':
+                ok = not text or text.startswith('（无')
+            else:                       # not_empty
+                ok = bool(text) and not text.startswith('（无')
+            results.append(ok)
+        return all(results) if multi.get('match_all', True) else any(results)
+
+    def open_multi_dialog(self):
+        dlg = MultiSummaryDialog(self, self.multi)
+        if dlg.exec_() != QDialog.Accepted:
+            return
+        cfg = dlg.config()
+        if cfg is None:
+            return
+        self.multi = cfg
+        self.btn_clear_multi.setVisible(True)
+        self.btn_multi.setText('多条件✓')
+        self.refresh()
+
+    def clear_multi(self, refresh=True):
+        """恢复原有单条件汇总。"""
+        if self.multi:
+            self.multi = None
+            self.btn_clear_multi.setVisible(False)
+            self.btn_multi.setText('多条件…')
+        if refresh:
+            self.refresh()
+
     def collect(self):
-        """按当前设置收集分组结果：[(分类, 单位, 合计, 行数), ...]"""
-        win = self.win
-        proj = getattr(win, 'project', None)
+        """按当前设置收集分组结果：[(分组值元组, 单位, 合计, 行数), ...]"""
+        proj = getattr(self.win, 'project', None)
         if proj is None:
             return []
-        sec = getattr(win, 'current_section', None)
+        sec = getattr(self.win, 'current_section', None)
         if self.only_cur.isChecked() and sec is not None:
             sections = list(sec.iter_self_and_desc())
         else:
             sections = proj.all_sections()
-        mode = self.mode_key()
+        fields = self.fields()
+        show_unit = self.show_unit_col()
         groups = {}
         for s in sections:
             for r in s.rows:
                 if getattr(r, 'no_count', False) or r.value is None:
                     continue
+                if not self.pass_filters(r, s):
+                    continue
                 unit = (getattr(r, 'unit', '') or '').strip()
-                if mode == 'code':
-                    key = (r.code or '').strip() or '（无编号）'
-                elif mode == 'name':
-                    key = (r.name or '').strip() or '（未命名）'
-                elif mode == 'part':
-                    key = (r.part or '').strip() or '（无部位）'
-                elif mode == 'section':
-                    key = s.name or '（未命名分部）'
-                else:
-                    key = unit or '（无单位）'
-                    unit = key
-                g = groups.setdefault((key, unit), [0.0, 0])
+                keys = tuple(self.row_field(r, s, f) for f in fields)
+                g = groups.setdefault((keys, unit if show_unit else ''), [0.0, 0])
                 g[0] += float(r.value)
                 g[1] += 1
         rows = [(k, u, v[0], v[1]) for (k, u), v in groups.items()]
-        if mode == 'code':
-            rows.sort(key=lambda t: natural_key(t[0]))
+        if fields == ['code'] and not self.multi:
+            rows.sort(key=lambda t: natural_key(t[0][0]))
         else:
-            rows.sort(key=lambda t: (-t[2], natural_key(t[0])))
+            rows.sort(key=lambda t: (-t[2], natural_key(t[0][0]) if t[0] else ''))
         return rows
 
     def refresh(self):
@@ -1160,24 +1348,31 @@ class SummaryPanel(QFrame):
         self._total = (total, cnt)
         self._units = {r[1] for r in rows if r[1]}
         prec = getattr(self.win, 'precision', 3)
-        # 首列表头跟着汇总方式变（编号 / 项目名称 / 部位 / 分部 / 单位）
-        hi = self.table.horizontalHeaderItem(0)
-        if hi is not None:
-            hi.setText(self.MODE_COL.get(self.mode_key(), '分类'))
+        heads = self.headers()
+        ncol = len(heads)
+        nkeys = len(self.fields())
+        show_unit = self.show_unit_col()
+        idx_unit = nkeys if show_unit else -1
+        idx_total, idx_cnt = ncol - 2, ncol - 1
+        self.table.setColumnCount(ncol)
+        self.table.setHorizontalHeaderLabels(heads)
+        hh = self.table.horizontalHeader()
+        for c in range(ncol):
+            hh.setSectionResizeMode(c, QHeaderView.Stretch if c == 0 else QHeaderView.Interactive)
         self.table.setRowCount(0)
-        for k, u, val, n in rows:
+        for keys, u, val, n in rows:
             r = self.table.rowCount()
             self.table.insertRow(r)
-            it0 = QTableWidgetItem(k)
-            it0.setToolTip(k)
-            # “按单位”汇总时单位就在分类列里，不再重复显示
-            it1 = QTableWidgetItem('' if self.mode_key() == 'unit' else u)
-            it1.setTextAlignment(Qt.AlignCenter)
-            it2 = QTableWidgetItem(fmt_num(val, precision_for_unit(u, prec)))
-            it2.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
-            it3 = QTableWidgetItem(str(n))
-            it3.setTextAlignment(Qt.AlignCenter)
-            for j, it in enumerate((it0, it1, it2, it3)):
+            cells = list(keys) + ([u] if show_unit else []) + [
+                fmt_num(val, precision_for_unit(u, prec)), str(n)]
+            for j, text in enumerate(cells):
+                it = QTableWidgetItem(text)
+                if j < nkeys:
+                    it.setToolTip(text)
+                if j == idx_total:
+                    it.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                elif j in (idx_cnt, idx_unit):
+                    it.setTextAlignment(Qt.AlignCenter)
                 self.table.setItem(r, j, it)
         # 合计行
         if rows:
@@ -1185,18 +1380,20 @@ class SummaryPanel(QFrame):
             self.table.insertRow(r)
             unit = (list(self._units)[0] if len(self._units) == 1 else '')
             mixed = len(self._units) > 1
-            it0 = QTableWidgetItem('合计（%d 项）' % len(rows))
-            it0.setFont(QFont('微软雅黑', 9, QFont.Bold))
-            it1 = QTableWidgetItem(unit)
-            it1.setTextAlignment(Qt.AlignCenter)
-            it2 = QTableWidgetItem('—' if mixed else fmt_num(total, precision_for_unit(unit, prec)))
-            it2.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
-            it2.setToolTip('多种单位不能直接相加，请按单位分别看各行' if mixed else '')
-            it2.setFont(QFont('微软雅黑', 9, QFont.Bold))
-            it3 = QTableWidgetItem(str(cnt))
-            it3.setTextAlignment(Qt.AlignCenter)
-            for j, it in enumerate((it0, it1, it2, it3)):
+            cells = ['合计（%d 项）' % len(rows)] + [''] * (nkeys - 1)
+            if show_unit:
+                cells.append(unit)
+            cells += ['—' if mixed else fmt_num(total, precision_for_unit(unit, prec)),
+                      str(cnt)]
+            for j, text in enumerate(cells):
+                it = QTableWidgetItem(text)
+                it.setFont(QFont('微软雅黑', 9, QFont.Bold))
                 it.setBackground(QBrush(QColor('#f5e6a8')))
+                if j == idx_total:
+                    it.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                    it.setToolTip('多种单位不能直接相加，请按单位分别看各行' if mixed else '')
+                elif j in (idx_cnt, idx_unit):
+                    it.setTextAlignment(Qt.AlignCenter)
                 self.table.setItem(r, j, it)
         self.lbl_info.setText('%d 项 / %d 行' % (len(rows), cnt))
         # 行高默认自适应；列宽只在第一次有数据时自适应（之后保留用户手动拖的宽度）
@@ -1204,7 +1401,6 @@ class SummaryPanel(QFrame):
             self.fit_rows()
             if was_empty:
                 self.fit_columns()
-        # 没有数据时导出/复制不可用（避免弹出“没有数据”的空提示）
         self.btn_export.setEnabled(bool(rows))
         self.btn_copy.setEnabled(bool(rows))
         self.win.lbl_status.setText('分类汇总（%s）：%d 项，%d 行'
@@ -1212,19 +1408,23 @@ class SummaryPanel(QFrame):
 
     # ---------------- 导出 / 复制 ----------------
     def as_matrix(self):
-        head = [self.MODE_COL.get(self.mode_key(), '分类'),
-                '' if self.mode_key() == 'unit' else '单位', '合计', '行数']
-        data = [head]
-        for k, u, val, n in self._groups:
-            data.append([k, '' if self.mode_key() == 'unit' else u,
-                         fmt_num(val, precision_for_unit(u, getattr(self.win, 'precision', 3))), n])
+        data = [self.headers()]
+        nkeys = len(self.fields())
+        show_unit = self.show_unit_col()
+        prec = getattr(self.win, 'precision', 3)
+        for keys, u, val, n in self._groups:
+            data.append(list(keys) + ([u] if show_unit else []) +
+                        [fmt_num(val, precision_for_unit(u, prec)), n])
         if self._groups:
             unit = (list(self._units)[0] if len(self._units) == 1 else '')
             mixed = len(self._units) > 1
-            data.append(['合计（%d 项）' % len(self._groups), unit,
-                         '—' if mixed else fmt_num(self._total[0],
-                                                   precision_for_unit(unit, getattr(self.win, 'precision', 3))),
-                         self._total[1]])
+            tail = ['—' if mixed else fmt_num(self._total[0],
+                                             precision_for_unit(unit, prec)),
+                    self._total[1]]
+            cells = ['合计（%d 项）' % len(self._groups)] + [''] * (nkeys - 1)
+            if show_unit:
+                cells.append(unit)
+            data.append(cells + tail)
         return data
 
     def copy_to_clipboard(self):
@@ -1249,15 +1449,18 @@ class SummaryPanel(QFrame):
         try:
             from openpyxl import Workbook
             from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
+            from openpyxl.utils import get_column_letter
             wb = Workbook()
             ws = wb.active
-            ws.title = self.mode_label()
+            ws.title = self.mode_label()[:31]
             data = self.as_matrix()
+            ncol = len(data[0])
+            nkeys = len(self.fields())
             thin = Side(style='thin', color='B0B0B0')
             border = Border(left=thin, right=thin, top=thin, bottom=thin)
             ws.append([(getattr(self.win.project, 'name', '') or '工程量计算书')
                        + ' — ' + self.mode_label() + '汇总'])
-            ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=4)
+            ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=ncol)
             ws.cell(row=1, column=1).font = Font(bold=True, size=13)
             ws.cell(row=1, column=1).alignment = Alignment(horizontal='center', vertical='center')
             ws.row_dimensions[1].height = 26
@@ -1271,17 +1474,17 @@ class SummaryPanel(QFrame):
                 for j, cell_text in enumerate(row, start=1):
                     c = ws.cell(row=i, column=j, value=cell_text)
                     c.border = border
-                    c.alignment = Alignment(horizontal='right' if j == 3 else
-                                            ('center' if j in (2, 4) else 'left'),
-                                            vertical='center')
+                    ha = ('right' if j == ncol - 1 else
+                          ('center' if j == ncol or j == nkeys + 1 else 'left'))
+                    c.alignment = Alignment(horizontal=ha, vertical='center')
                 if i == 2 + len(self._groups):
-                    for j in range(1, 5):
+                    for j in range(1, ncol + 1):
                         ws.cell(row=i, column=j).font = Font(bold=True)
                     ws.cell(row=i, column=1).fill = PatternFill('solid', fgColor='FFF2A8')
-            ws.column_dimensions['A'].width = 30
-            ws.column_dimensions['B'].width = 10
-            ws.column_dimensions['C'].width = 14
-            ws.column_dimensions['D'].width = 8
+            for j in range(1, ncol + 1):
+                letter = get_column_letter(j)
+                ws.column_dimensions[letter].width = (30 if j <= nkeys else
+                                                      (10 if j == nkeys + 1 else 14 if j == ncol - 1 else 8))
             ws.freeze_panes = 'A3'
             wb.save(path)
         except Exception as e:
@@ -1297,6 +1500,130 @@ class SummaryPanel(QFrame):
                 pass
 
 
+
+
+class MultiSummaryDialog(QDialog):
+    """多条件汇总设置：多个分组字段 + 多条筛选条件（满足全部 / 满足任一）。"""
+
+    OPS = [('contains', '包含'), ('not_contains', '不包含'), ('eq', '等于'),
+           ('ne', '不等于'), ('empty', '为空'), ('not_empty', '不为空')]
+
+    def __init__(self, panel, current=None, parent=None):
+        super().__init__(parent or panel)
+        self.setWindowTitle('多条件汇总设置')
+        self.resize(520, 420)
+        self._rows = []
+        v = QVBoxLayout(self)
+
+        gb = QGroupBox('分组字段（至少选一个，可多选）')
+        gbl = QVBoxLayout(gb)
+        self.checks = {}
+        grid = QGridLayout()
+        for i, (key, label) in enumerate(SummaryPanel.MODES):
+            cb = QCheckBox(label)
+            self.checks[key] = cb
+            grid.addWidget(cb, i // 3, i % 3)
+        gbl.addLayout(grid)
+        v.addWidget(gb)
+
+        gb2 = QGroupBox('筛选条件（可留空，表示不筛选）')
+        g2 = QVBoxLayout(gb2)
+        self.cond_host = QWidget()
+        self.cond_layout = QVBoxLayout(self.cond_host)
+        self.cond_layout.setContentsMargins(0, 0, 0, 0)
+        self.cond_layout.setSpacing(3)
+        g2.addWidget(self.cond_host)
+        bar = QHBoxLayout()
+        b_add = QPushButton('+ 添加条件')
+        b_add.clicked.connect(self.add_condition)
+        bar.addWidget(b_add)
+        bar.addStretch(1)
+        g2.addLayout(bar)
+        v.addWidget(gb2)
+
+        match = QHBoxLayout()
+        self.rb_all = QRadioButton('满足全部条件（AND）')
+        self.rb_any = QRadioButton('满足任一条件（OR）')
+        bg = QButtonGroup(self)
+        bg.addButton(self.rb_all)
+        bg.addButton(self.rb_any)
+        self.rb_all.setChecked(True)
+        match.addWidget(self.rb_all)
+        match.addWidget(self.rb_any)
+        match.addStretch(1)
+        v.addLayout(match)
+
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.button(QDialogButtonBox.Ok).setText('应用')
+        bb.button(QDialogButtonBox.Cancel).setText('取消')
+        bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.reject)
+        v.addWidget(bb)
+
+        current = current or {}
+        for key in (current.get('fields') or [panel.mode_key()]):
+            if key in self.checks:
+                self.checks[key].setChecked(True)
+        self.rb_all.setChecked(current.get('match_all', True))
+        self.rb_any.setChecked(not current.get('match_all', True))
+        for field, op, value in (current.get('filters') or []):
+            self.add_condition(field, op, value)
+        if not self._rows:
+            self.add_condition()
+
+    def add_condition(self, field='code', op='contains', value=''):
+        """添加一行筛选条件；信号连 lambda 时前三个参数有默认值，可直接当槽用。"""
+        row = QWidget()
+        h = QHBoxLayout(row)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.setSpacing(4)
+        cb_field = QComboBox()
+        for key, label in SummaryPanel.MODES:
+            cb_field.addItem(label, key)
+        idx = cb_field.findData(field if isinstance(field, str) else 'code')
+        cb_field.setCurrentIndex(max(0, idx))
+        cb_op = QComboBox()
+        for key, label in self.OPS:
+            cb_op.addItem(label, key)
+        idx = cb_op.findData(op if isinstance(op, str) else 'contains')
+        cb_op.setCurrentIndex(max(0, idx))
+        ed = QLineEdit(value if isinstance(value, str) else '')
+        ed.setPlaceholderText('关键词（为空/不为空可留空）')
+        btn = QToolButton()
+        btn.setText('×')
+        btn.setToolTip('删除此条件')
+        btn.setAutoRaise(True)
+        btn.clicked.connect(lambda: self.remove_condition(row))
+        h.addWidget(cb_field)
+        h.addWidget(cb_op)
+        h.addWidget(ed, 1)
+        h.addWidget(btn)
+        self.cond_layout.addWidget(row)
+        self._rows.append((row, cb_field, cb_op, ed))
+        return row
+
+    def remove_condition(self, row):
+        for i, item in enumerate(self._rows):
+            if item[0] is row:
+                self._rows.pop(i)
+                self.cond_layout.removeWidget(row)
+                row.setParent(None)
+                row.deleteLater()
+                break
+
+    def config(self):
+        fields = [key for key, cb in self.checks.items() if cb.isChecked()]
+        if not fields:
+            QMessageBox.information(self, APP_NAME, '请至少选择一个分组字段。')
+            return None
+        filters = []
+        for _row, cb_field, cb_op, ed in self._rows:
+            val = ed.text().strip()
+            op = cb_op.currentData()
+            if op in ('empty', 'not_empty') or val:
+                filters.append((cb_field.currentData(), op, val))
+        return {'fields': fields, 'filters': filters,
+                'match_all': self.rb_all.isChecked()}
 
 
 class FindDialog(QDialog):
@@ -2673,6 +3000,8 @@ class MainWindow(QMainWindow):
             lambda idx: self.fit_column_widths([idx]))
         self.table.verticalHeader().sectionHandleDoubleClicked.connect(
             lambda idx: self.fit_row_heights([idx]))
+        # 列宽变化（手动拖动 / 自动排版）后，自动行高模式下按新宽度重新折行
+        self.table.horizontalHeader().sectionResized.connect(self._on_col_width_changed)
 
         # 表格直接占满右侧（备注就在表格“备注”列里编辑）
         th.addWidget(self.table, 1)
@@ -3276,6 +3605,14 @@ class MainWindow(QMainWindow):
         self._apply_row_height_mode()
         # 列宽：默认按内容自适应并铺满窗口（用户手动拖过列宽后自动关闭）
         self._auto_size_columns()
+        # 记住界面上当前各行的真实高度，打印时按同一行高输出
+        heights = {}
+        for i, row in enumerate(sec.rows):
+            if i < self.table.rowCount():
+                heights[id(row)] = self.table.rowHeight(i)
+        self._row_height_cache = heights
+        vals = list(heights.values())
+        self._row_height_default = (max(set(vals), key=vals.count) if vals else 34)
         self._loading = False
         self.lbl_status.setText('%s：%d 行，小计 %s'
                                 % (sec.name, len(sec.rows),
@@ -4334,6 +4671,39 @@ class MainWindow(QMainWindow):
         self.fit_column_widths()
         self.fit_row_heights()
 
+    def _sync_col_widths_to_model(self):
+        """把界面当前列宽写回列定义：打印 / 预览 / 导出 Excel 都用同一套宽度。"""
+        table = getattr(self, 'table', None)
+        if table is None or not hasattr(self, 'project'):
+            return
+        for j, cd in enumerate(self.project.columns):
+            if j >= table.columnCount():
+                break
+            w = int(table.columnWidth(j))
+            if w > 0 and cd.get('width') != w:
+                cd['width'] = w
+
+    def _on_col_width_changed(self, *_args):
+        """列宽变化后：写回列定义供打印使用，并按需重排自动行高。"""
+        try:
+            self._sync_col_widths_to_model()
+        except Exception:
+            log_exception('列宽写回列定义')
+        if not getattr(self, '_row_autofit', False):
+            return
+        if getattr(self, '_row_refit_pending', False):
+            return
+        self._row_refit_pending = True
+        QTimer.singleShot(90, self._refit_rows_delayed)
+
+    def _refit_rows_delayed(self):
+        self._row_refit_pending = False
+        try:
+            if getattr(self, '_row_autofit', False) and hasattr(self, 'table'):
+                self._apply_row_height_mode()
+        except Exception:
+            log_exception('列宽变化后重排行高')
+
     def _apply_row_height_mode(self):
         """刷新表格时按当前行高模式还原（自适应 / 默认 34px）。"""
         if getattr(self, '_row_autofit', False):
@@ -4922,9 +5292,24 @@ class MainWindow(QMainWindow):
         return va, ha
 
     def _report_col_pct(self):
-        """各列宽度百分比（按界面列宽比例，避免预览/打印时各列被均分挤压换行）。"""
-        cw = [max(float(c.get('width', 100)), 72.0) if c.get('key') == 'no_count'
-              else float(c.get('width', 100)) for c in self.project.columns]
+        """各列宽度百分比：优先取界面上当前的真实列宽（含手动拖动后的宽度）。"""
+        table = getattr(self, 'table', None)
+        cw = []
+        for i, c in enumerate(self.project.columns):
+            w = 0.0
+            if table is not None and i < table.columnCount():
+                try:
+                    w = float(table.columnWidth(i))
+                except Exception:
+                    w = 0.0
+            if w <= 0:
+                try:
+                    w = float(c.get('width', 100) or 100)
+                except Exception:
+                    w = 100.0
+            if c.get('key') == 'no_count':
+                w = max(w, 72.0)
+            cw.append(w)
         tot = sum(cw) or 1.0
         pct = [w / tot * 100.0 for w in cw]
         # 窄列（编号/单位/工程量/备注/不计）保证最小占比，避免表头与数字被挤成两行
@@ -4935,6 +5320,19 @@ class MainWindow(QMainWindow):
             _sum = sum(pct) or 1.0
             pct = [x / _sum * 100.0 for x in pct]
         return pct
+
+    def _report_row_pad(self, row=None):
+        """按界面当前行高生成单元格上下内边距（Qt 富文本只认 padding，不认 height）。"""
+        h = self._row_height_default if hasattr(self, '_row_height_default') else 34
+        if row is not None:
+            h = getattr(self, '_row_height_cache', {}).get(id(row), h)
+        try:
+            h = float(h)
+        except Exception:
+            h = 34.0
+        base = QFontMetrics(QFont('微软雅黑', 9)).height() + 6
+        pad = 3 + max(0, int(h - base)) // 2
+        return int(max(3, min(60, pad)))
 
     def _report_table_open(self, pct):
         """表格开始标签（含列宽比例）。"""
@@ -4987,7 +5385,9 @@ class MainWindow(QMainWindow):
                     # 填充色优先级：单元格 > 整行 > 整列
                     bg = (getattr(r, 'cell_fill', None) or {}).get(key) or \
                         getattr(r, 'fill', '') or cd.get('fill', '') or ''
-                    style = 'vertical-align:%s;' % va + ('background:%s;' % bg if bg else '')
+                    pad = self._report_row_pad(r)
+                    style = ('vertical-align:%s;padding-top:%dpx;padding-bottom:%dpx;'
+                             % (va, pad, pad)) + ('background:%s;' % bg if bg else '')
                     tds.append('<td width="%.1f%%" style="%s">%s</td>'
                                % (pct[k] if k < len(pct) else 0, style, text))
                 parts.append('<tr>' + ''.join(tds) + '</tr>')
