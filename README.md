@@ -1,7 +1,7 @@
 # 工程量计算书 CalcBook
 
 > 基于 **Python + PyQt5** 的建筑工程量计算书工具 —— 分层目录、公式自动计算、单位精度控制、打印导出。
-> 当前版本：**V2.7.0**
+> 当前版本：**V2.7.1**
 
 ![主界面](docs/screenshot-main.png)
 
@@ -9,6 +9,7 @@
 
 ## 本次修订（2026-11-22）
 
+- **粘贴自动加行**：粘贴的数据行数超过现有行数时自动在末尾补足空行，不用再手动逐行右键添加。双击单元格进入编辑态后粘贴多行数据同样生效。
 - **修复粘贴错位**：从 WPS / Excel 复制数据点选备注列再粘贴，不再偶尔贴到编码列；粘贴起点统一取选中区域的左上角。
 - **单元格数据删除**：框选单元格后右键「删除单元格数据」或按 **Delete** 键即可清空内容（保留行列结构、可撤销）；整行 / 整列选中时按 Delete 仍删除整行 / 整列。
 - **修复单位下拉选不中**：进一步加固——弹窗事件放行、延时提交、去掉全选干扰，单位下拉选项可稳定选中。
@@ -68,13 +69,13 @@
 
 ### 方式一：直接下载可执行文件（推荐给非技术用户）
 
-到 [Releases](https://github.com/li993145/calcbook/releases/tag/v2.7.0) 下载 `CalcBook-v2.7.0.exe`（即「工程量计算书 V2.7.0」，约 56MB），双击运行，免安装。
+到 [Releases](https://github.com/li993145/calcbook/releases/tag/v2.7.1) 下载 `CalcBook-v2.7.1.exe`（即「工程量计算书 V2.7.1」，约 56MB），双击运行，免安装。
 
-> 直链：<https://github.com/li993145/calcbook/releases/download/v2.7.0/CalcBook-v2.7.0.exe>
+> 直链：<https://github.com/li993145/calcbook/releases/download/v2.7.1/CalcBook-v2.7.1.exe>
 >
-> 本版本更新明细见 [RELEASE_NOTES_v2.7.0.md](RELEASE_NOTES_v2.7.0.md)。
+> 本版本更新明细见 [RELEASE_NOTES_v2.7.1.md](RELEASE_NOTES_v2.7.1.md)。
 >
-> 历史版本：[V2.6.0](https://github.com/li993145/calcbook/releases/tag/v2.6.0)（[更新明细](RELEASE_NOTES_v2.6.0.md)）、[V2.5.0](https://github.com/li993145/calcbook/releases/tag/v2.5.0)（[更新明细](RELEASE_NOTES_v2.5.0.md)）。
+> 历史版本：[V2.7.0](https://github.com/li993145/calcbook/releases/tag/v2.7.0)（[更新明细](RELEASE_NOTES_v2.7.0.md)）、[V2.6.0](https://github.com/li993145/calcbook/releases/tag/v2.6.0)（[更新明细](RELEASE_NOTES_v2.6.0.md)）、[V2.5.0](https://github.com/li993145/calcbook/releases/tag/v2.5.0)（[更新明细](RELEASE_NOTES_v2.5.0.md)）。
 
 ### 方式二：从源码运行
 

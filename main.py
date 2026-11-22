@@ -32,7 +32,7 @@ from ui_printpreview import PrintPreviewPane
 from core.highlighter import FormulaHighlighter, compute_runs, FCOLOR
 
 APP_NAME = "工程量计算书"
-APP_VER = "2.7.0"
+APP_VER = "2.7.1"
 FILE_EXT = '.gcls'          # 工程文件后缀（内容仍是 JSON，便于排查与迁移）
 
 # ---- 工程文件关联（让资源管理器把 .gcls 显示成软件图标）----
@@ -2518,6 +2518,29 @@ class MainWindow(QMainWindow):
                 if top is not None and top is not self:
                     return False
             et = ev.type()
+            # 双击单元格进入编辑态后，Ctrl+V 事件被单元格编辑器（QLineEdit）消费，
+            # 到不了表格的 keyPressEvent，于是多行数据只塞进当前单元格、行数也不会
+            # 自动扩展。这里接管：若焦点在表格编辑器里且剪贴板是多行/多列(TSV)，
+            # 先关掉编辑器再走自定义粘贴，由 paste_text 负责自动加行。
+            if (et == QEvent.KeyPress and ev.key() == Qt.Key_V
+                    and (ev.modifiers() & Qt.ControlModifier)
+                    and isinstance(obj, QLineEdit)):
+                p = obj
+                in_table = False
+                while p is not None:
+                    if p is self.table:
+                        in_table = True
+                        break
+                    p = p.parent()
+                if in_table:
+                    clip = QApplication.clipboard().text()
+                    if clip and ('\n' in clip or '\r' in clip or '\t' in clip):
+                        try:
+                            self.table.closeEditor(obj, QAbstractItemDelegate.NoHint)
+                        except Exception:
+                            pass
+                        self.paste_text(clip)
+                        return True
             if et == QEvent.MouseButtonPress and ev.button() == Qt.LeftButton:
                 if not self._maximized:
                     d = self._hit_edge(ev.globalPos())
@@ -3896,9 +3919,12 @@ class MainWindow(QMainWindow):
             start_col = max(self.table.currentColumn(), 0)
         sec = self.current_section
         need = start_row + len(rows)
+        before_n = len(sec.rows)
         self.push_undo('粘贴')
+        # 粘贴行数超过现有行数时，自动在末尾补足空行，数据才能完整落位
         while len(sec.rows) < need:
             sec.rows.append(Row())
+        added = len(sec.rows) - before_n
         cols = self.project.columns
         self._loading = True
         for i, cells in enumerate(rows):
@@ -3919,7 +3945,10 @@ class MainWindow(QMainWindow):
         self._loading = False
         self.project.recalc()
         self.refresh_table()
-        self.status.showMessage(f'已粘贴 {len(rows)} 行 × {max(len(x) for x in rows)} 列', 3000)
+        msg = f'已粘贴 {len(rows)} 行 × {max(len(x) for x in rows)} 列'
+        if added:
+            msg += f'，已自动新增 {added} 行'
+        self.status.showMessage(msg, 4000)
 
     # ---------------- 树节点操作（单项工程 / 单位工程 / 分部 / 分项 …） ----------------
     def _tree_section(self):
