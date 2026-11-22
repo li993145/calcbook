@@ -1,13 +1,27 @@
 # 工程量计算书 CalcBook
 
 > 基于 **Python + PyQt5** 的建筑工程量计算书工具 —— 分层目录、公式自动计算、单位精度控制、打印导出。
-> 当前版本：**V2.8.1**
+> 当前版本：**V2.8.3**
 
 ![主界面](docs/screenshot-main.png)
 
 ---
 
-## 本次修订（V2.8.1）
+## 本次修订（V2.8.3）
+
+- **清除最近打开列表**：「最近打开」列表底部新增「清除最近打开列表」，一键清空并保存。
+- **行 / 列高亮颜色统一**：两个高亮改为同一淡蓝底纹（原来行黄列蓝），交叉处稍深。
+- **项目树分隔线可拖动**：左侧导航「名称 / 层级」分隔线可手动调整宽度。
+- **全选后右键菜单补全**：全选表格后右键新增「复制选中单元格」「全选表格」，整表可直接复制到 WPS/Excel。
+- **文档清理**：源码注释与说明文档里的第三方称呼全部移除。
+
+### V2.8.2
+
+- **表格字体设置**：格式 →「表格字体」，可选系统字库字体（宋体 / 黑体 / 仿宋等）与 6–24 号字号，行高列宽自动重排并记住设置。
+- **恢复选中行高亮**：与「选中列高亮」同款开关，底纹叠加不改选择模式。
+- **删除「公式说明」按钮**：帮助统一从「关于产品 → 使用说明」进入；使用说明页按 V2.8.1 完整功能重写。
+
+### V2.8.1
 
 - **删除「写入公式」按钮**：移除「公式编辑」功能区里无效的「写入公式」按钮（公式辅助输入框仍可正常使用）。
 - **插入函数加入「求平均值」**：统计函数组新增 `avg`（如 `avg(1,2,3)=2`），公式引擎同步支持。
@@ -83,14 +97,14 @@
 
 ### 方式一：直接下载可执行文件（推荐给非技术用户）
 
-下载 `CalcBook-v2.8.1.exe`（约 56MB），双击运行，免安装：
+下载 `CalcBook-v2.8.3.exe`（约 58MB），双击运行，免安装：
 
-- [Gitee Release（推荐国内用户，点附件下载）](https://gitee.com/li993145/calcbook/releases/tag/v2.8.1)
-- [GitHub Release](https://github.com/li993145/calcbook/releases/tag/v2.8.1)
+- [Gitee Release（推荐国内用户，点附件下载）](https://gitee.com/li993145/calcbook/releases/tag/v2.8.3)
+- [GitHub Release](https://github.com/li993145/calcbook/releases/tag/v2.8.3)
 
-> 本版本更新明细见 [RELEASE_NOTES_v2.8.1.md](RELEASE_NOTES_v2.8.1.md)。
+> 本版本更新明细见 [RELEASE_NOTES_v2.8.3.md](RELEASE_NOTES_v2.8.3.md)。
 >
-> 历史版本：[V2.8.0](https://gitee.com/li993145/calcbook/releases/tag/v2.8.0)（[更新明细](RELEASE_NOTES_v2.8.0.md)）、[V2.7.3](https://gitee.com/li993145/calcbook/releases/tag/v2.7.3)（[更新明细](RELEASE_NOTES_v2.7.3.md)）、[V2.7.2](https://github.com/li993145/calcbook/releases/tag/v2.7.2)（[更新明细](RELEASE_NOTES_v2.7.2.md)）、[V2.7.1](https://github.com/li993145/calcbook/releases/tag/v2.7.1)（[更新明细](RELEASE_NOTES_v2.7.1.md)）、[V2.7.0](https://github.com/li993145/calcbook/releases/tag/v2.7.0)（[更新明细](RELEASE_NOTES_v2.7.0.md)）、[V2.6.0](https://github.com/li993145/calcbook/releases/tag/v2.6.0)（[更新明细](RELEASE_NOTES_v2.6.0.md)）、[V2.5.0](https://github.com/li993145/calcbook/releases/tag/v2.5.0)（[更新明细](RELEASE_NOTES_v2.5.0.md)）。
+> 历史版本：[V2.8.2](https://gitee.com/li993145/calcbook/releases/tag/v2.8.2)（[更新明细](RELEASE_NOTES_v2.8.2.md)）、[V2.8.1](https://gitee.com/li993145/calcbook/releases/tag/v2.8.1)（[更新明细](RELEASE_NOTES_v2.8.1.md)）、[V2.8.0](https://gitee.com/li993145/calcbook/releases/tag/v2.8.0)（[更新明细](RELEASE_NOTES_v2.8.0.md)）、[V2.7.3](https://gitee.com/li993145/calcbook/releases/tag/v2.7.3)（[更新明细](RELEASE_NOTES_v2.7.3.md)）、[V2.7.2](https://github.com/li993145/calcbook/releases/tag/v2.7.2)（[更新明细](RELEASE_NOTES_v2.7.2.md)）、[V2.7.1](https://github.com/li993145/calcbook/releases/tag/v2.7.1)（[更新明细](RELEASE_NOTES_v2.7.1.md)）、[V2.7.0](https://github.com/li993145/calcbook/releases/tag/v2.7.0)（[更新明细](RELEASE_NOTES_v2.7.0.md)）、[V2.6.0](https://github.com/li993145/calcbook/releases/tag/v2.6.0)（[更新明细](RELEASE_NOTES_v2.6.0.md)）、[V2.5.0](https://github.com/li993145/calcbook/releases/tag/v2.5.0)（[更新明细](RELEASE_NOTES_v2.5.0.md)）。
 
 ### 方式二：从源码运行
 

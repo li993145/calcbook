@@ -16,7 +16,7 @@ DEFAULT_LEVELS = ['单项工程', '单位工程', '分部工程', '分项工程'
 
 
 # 默认列定义：每列 {key, title, width, builtin}
-# 列宽参照兔兔：计算公式最宽，编号/单位/不计较窄，备注放右侧面板
+# 列宽：计算公式最宽，编号/单位/不计较窄，备注放右侧面板
 DEFAULT_COLUMNS = [
     {'key': 'code', 'title': '编号', 'width': 120, 'builtin': True},
     {'key': 'name', 'title': '项目名称', 'width': 200, 'builtin': True},

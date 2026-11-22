@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
-"""仿兔兔建筑计算书的紧凑 Ribbon 工具栏。
+"""紧凑 Ribbon 工具栏。
 
-参照兔兔实测截图：小图标(16px) + 小字(9pt)，组内按钮按两行网格紧凑排布，
+小图标(16px) + 小字(9pt)，组内按钮按两行网格紧凑排布，
 组标题在底部，整条工具栏很矮。不使用 Qt 高 DPI 自动缩放，
-保证在不同缩放比例的屏幕上显示尺寸一致（与兔兔 Delphi 程序行为一致）。
+保证在不同缩放比例的屏幕上显示尺寸一致。
 图标用 QStyle 标准图标或代码绘制字符，不依赖外部图片。
 """
 
@@ -58,7 +58,7 @@ def make_printer_icon(size=20, color='#2f5597'):
 
 
 def make_icon(app, name_or_char, color='#2f5597'):
-    """生成小尺寸图标（兔兔风格 16~20px）。"""
+    """生成小尺寸图标（16~20px）。"""
     if name_or_char == 'print':
         return make_printer_icon(20, color)
     if name_or_char in STYLE_ICONS:
@@ -124,7 +124,7 @@ class RibbonGroup(QFrame):
         btn.setIcon(make_icon(app, icon_key))
         btn.setToolButtonStyle(Qt.ToolButtonTextUnderIcon)
         btn.setIconSize(QSize(16, 16))
-        # 按文字实际宽度定宽（比 Qt 默认留白更紧，仿兔兔）。
+        # 按文字实际宽度定宽（比 Qt 默认留白更紧）。
         # 宽度 = 文字宽 + 余量，保证不出现省略号裁剪。
         btn.setFont(QFont('微软雅黑', 9))
         tw = btn.fontMetrics().horizontalAdvance(text)
@@ -541,7 +541,7 @@ class RibbonWidget(QWidget):
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(0)
 
-        # 页签行：靠左排列（软件名/版本/文件位置在更上面那条标题条里，仿兔兔）
+        # 页签行：靠左排列（软件名/版本/文件位置在更上面那条标题条里）
         tab_bar = QHBoxLayout()
         tab_bar.setContentsMargins(8, 2, 8, 0)
         tab_bar.setSpacing(2)
