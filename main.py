@@ -32,7 +32,7 @@ from ui_printpreview import PrintPreviewPane
 from core.highlighter import FormulaHighlighter, compute_runs, FCOLOR
 
 APP_NAME = "工程量计算书"
-APP_VER = "2.7.1"
+APP_VER = "2.7.2"
 FILE_EXT = '.gcls'          # 工程文件后缀（内容仍是 JSON，便于排查与迁移）
 
 # ---- 工程文件关联（让资源管理器把 .gcls 显示成软件图标）----
@@ -433,10 +433,59 @@ class LiveSyncDelegate(QStyledItemDelegate):
         super().setModelData(editor, model, index)
 
     # ---------- 绘制 ----------
+    def _hilite_color(self, index):
+        """当前行 / 列高亮底色：返回 (QColor, alpha) 或 None。不改选择模式，只叠加淡色底纹。"""
+        win = getattr(self, 'win', None)
+        if win is None:
+            return None
+        table = getattr(win, 'table', None)
+        if table is None or not index.isValid():
+            return None
+        # 选中态优先，避免与系统选中蓝底冲突
+        try:
+            if index in table.selectionModel().selectedIndexes():
+                return None
+        except Exception:
+            return None
+        try:
+            cur = table.currentIndex()
+            row_hit = bool(getattr(win, '_hilite_row', False)
+                           and cur.isValid() and index.row() == cur.row())
+            col_hit = bool(getattr(win, '_hilite_col', False)
+                           and cur.isValid() and index.column() == cur.column())
+        except Exception:
+            return None
+        if not (row_hit or col_hit):
+            return None
+        if row_hit and col_hit:
+            return (QColor('#f2c800'), 70)   # 当前单元格：稍深的黄
+        if row_hit:
+            return (QColor('#f5d000'), 45)   # 当前行：浅黄
+        return (QColor('#2f7de0'), 40)       # 当前列：浅蓝
+
+    def _overlay_hilite(self, painter, option, index):
+        """在单元格绘制完成后叠加半透明高亮色块（不动 QStyle 内部状态，最安全）。"""
+        h = self._hilite_color(index)
+        if h is None:
+            return
+        color, alpha = h
+        painter.save()
+        try:
+            c = QColor(color)
+            c.setAlpha(alpha)
+            painter.fillRect(option.rect, c)
+        finally:
+            painter.restore()
+
     def paint(self, painter, option, index):
         key = self.win.col_key(index.column())
         if key not in ('no_count', 'formula'):
-            return super().paint(painter, option, index)
+            super().paint(painter, option, index)
+            try:
+                self._overlay_hilite(painter, option, index)
+            except Exception:
+                pass
+            return
         try:
             opt = QStyleOptionViewItem(option)
             self.initStyleOption(opt, index)
@@ -453,6 +502,7 @@ class LiveSyncDelegate(QStyledItemDelegate):
                 self._paint_check(painter, opt, index, style)
             else:
                 self._paint_formula(painter, opt, text, index)
+            self._overlay_hilite(painter, opt, index)
         except Exception:
             # 槽函数里未捕获异常会让 PyQt5 直接 qFatal（表现为 exe 闪退）
             try:
@@ -2287,6 +2337,9 @@ class MainWindow(QMainWindow):
         # 行高 / 列宽默认自适应（V2.5）：不用每次手动点“自适应”
         self._row_autofit = self.settings.value('row_autofit', True, type=bool)
         self._col_autofit = self.settings.value('col_autofit', True, type=bool)
+        # 当前行 / 列高亮（只加淡色底纹，不改变选择模式，避免影响框选删除、粘贴锚点）
+        self._hilite_row = self.settings.value('hilite_row', True, type=bool)
+        self._hilite_col = self.settings.value('hilite_col', False, type=bool)
         # 撤销 / 恢复：栈里存的是“改动前”的工程快照
         self._undo_stack = []        # [(标签, 快照)]
         self._redo_stack = []
@@ -2835,7 +2888,8 @@ class MainWindow(QMainWindow):
             ('分类汇总', self.data_summary),
             ('插入函数', self.show_function_picker),
             ('树形显示', self.toggle_tree_expand),
-            ('选中行高亮', self.toggle_row_highlight),
+            ('选中行高亮', self.toggle_row_highlight, self._hilite_row),
+            ('选中列高亮', self.toggle_col_highlight, self._hilite_col),
             ('F4 前置()', lambda: self.insert_bracket('pre')),
             ('F5 插入()', lambda: self.insert_bracket('cur')),
             ('F6 插入[]', lambda: self.insert_bracket('cur_sq')),
@@ -2844,19 +2898,29 @@ class MainWindow(QMainWindow):
             ('列宽自适应', self.fit_column_widths),
             ('行高自适应', self.fit_row_heights),
         ]
-        for text, slot in quick_actions:
+        self._hilite_buttons = {}
+        for item in quick_actions:
+            text, slot = item[0], item[1]
             b = QPushButton(text)
             b.setObjectName('quickLink')
             b.setFlat(True)
             b.setStyleSheet('QPushButton#quickLink { border:1px solid transparent; background:transparent;'
                             ' color:#24507a; font-size:8.5pt; padding:0px 3px; text-align:left; }'
-                            ' QPushButton#quickLink:hover { background:#dce8f5; border:1px solid #b8cde3; }')
+                            ' QPushButton#quickLink:hover { background:#dce8f5; border:1px solid #b8cde3; }'
+                            ' QPushButton#quickLink:checked { background:#cfe0f2; border:1px solid #7ba3cc; }')
             b.setMinimumWidth(0)
             try:
                 b.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
             except Exception:
                 pass
-            b.clicked.connect(lambda checked=False, sl=slot: sl())
+            if len(item) >= 3:
+                # 可勾选开关（行/列高亮）：用 toggled 传勾选态，按钮外观即启用状态
+                b.setCheckable(True)
+                b.setChecked(bool(item[2]))
+                self._hilite_buttons[text] = b
+                b.toggled.connect(lambda checked=False, sl=slot: sl(checked))
+            else:
+                b.clicked.connect(lambda checked=False, sl=slot: sl())
             qb.addWidget(b)
         qb.addStretch(1)
         # 右侧分类汇总收起后，这里出现“展开汇总”按钮
@@ -3757,9 +3821,12 @@ class MainWindow(QMainWindow):
         self.refresh_table()
 
     def on_cell_cursor(self, row, col, prev_row, prev_col):
-        """选中单元格：公式列联动辅助框，双向同步。"""
+        """选中单元格：公式列联动辅助框，双向同步；行/列高亮随光标重绘。"""
         if self._loading:
             return
+        # 行/列高亮需要跟着当前单元格重绘（委托在 paint 时读取 currentIndex）
+        if getattr(self, '_hilite_row', False) or getattr(self, '_hilite_col', False):
+            self.table.viewport().update()
         is_formula_col = (self.col_key(col) == 'formula')
         if is_formula_col and 0 <= row < len(self.current_section.rows):
             text = self.current_section.rows[row].formula
@@ -4456,6 +4523,8 @@ class MainWindow(QMainWindow):
         menu.addAction('删除选中行', self.delete_rows)
         menu.addAction('粘贴 WPS 数据  (Ctrl+V)', self.paste_from_clipboard)
         menu.addSeparator()
+        menu.addAction('设置选中行行高…', self.set_row_height_dialog)
+        menu.addAction('设置选中列列宽…', self.set_column_width_dialog)
         menu.addAction('列宽自适应（按内容）', lambda: self.fit_column_widths())
         menu.addAction('行高自适应（按内容）', lambda: self.fit_row_heights())
         menu.addAction('恢复默认行高', self.reset_row_heights)
@@ -4489,6 +4558,7 @@ class MainWindow(QMainWindow):
         color_menu.addAction('其他颜色…', lambda: self.fill_color_dialog('row'))
         color_menu.addAction('清除本行底色', lambda: self.apply_fill('', 'row'))
         menu.addSeparator()
+        menu.addAction('设置本行行高…', lambda r=row: self.set_row_height_dialog([r]))
         menu.addAction('本行行高自适应', lambda: self.fit_row_heights([row]))
         menu.addAction('全部行高自适应', lambda: self.fit_row_heights())
         menu.addAction('全部列宽自适应', lambda: self.fit_column_widths())
@@ -4798,6 +4868,59 @@ class MainWindow(QMainWindow):
             self.table.setRowHeight(i, 34)
         self.status.showMessage('已恢复默认行高', 3000)
 
+    def set_row_height_dialog(self, rows=None):
+        """输入具体像素值设置行高（手动设定会关闭自动行高，避免被自适应覆盖）。"""
+        if rows is None:
+            sel = sorted({i.row() for i in self.table.selectionModel().selectedIndexes()})
+            cur = self.table.currentRow()
+            rows = sel if sel else ([cur] if cur >= 0 else [])
+        rows = [r for r in rows if 0 <= r < self.table.rowCount()]
+        if not rows:
+            QMessageBox.information(self, APP_NAME, '请先选中要设置行高的行。')
+            return
+        sample = self.table.rowHeight(rows[0]) or 34
+        val, ok = QInputDialog.getInt(self, '设置行高', '行高（像素，18–300）：',
+                                      sample, 18, 300, 1)
+        if not ok:
+            return
+        self.push_undo('设置行高')
+        self._row_autofit = False
+        self._set_setting('row_autofit', False)
+        self.table.setWordWrap(False)
+        for r in rows:
+            self.table.setRowHeight(r, val)
+        self._dirty = True
+        self.status.showMessage('已设置 %d 行的行高为 %d 像素' % (len(rows), val), 3000)
+
+    def set_column_width_dialog(self, cols=None):
+        """输入具体像素值设置列宽，并写回列定义（打印/导出同步）。"""
+        if cols is None:
+            sel = sorted({i.column() for i in self.table.selectionModel().selectedIndexes()})
+            cur = self.table.currentColumn()
+            cols = sel if sel else ([cur] if cur >= 0 else [])
+        cols = [c for c in cols if 0 <= c < self.table.columnCount()]
+        if not cols:
+            QMessageBox.information(self, APP_NAME, '请先选中要设置列宽的列。')
+            return
+        sample = self.table.columnWidth(cols[0]) or 100
+        val, ok = QInputDialog.getInt(self, '设置列宽', '列宽（像素，30–600）：',
+                                      sample, 30, 600, 1)
+        if not ok:
+            return
+        self.push_undo('设置列宽')
+        # 手动设定后关闭自动列宽，否则刷新/缩放时会被“自动铺满”覆盖
+        self._col_autofit = False
+        self._set_setting('col_autofit', False)
+        for c in cols:
+            self.table.horizontalHeader().setSectionResizeMode(c, QHeaderView.Interactive)
+            self.table.setColumnWidth(c, val)
+        try:
+            self._sync_col_widths_to_model()
+        except Exception:
+            log_exception('列宽写回列定义')
+        self._dirty = True
+        self.status.showMessage('已设置 %d 列的列宽为 %d 像素' % (len(cols), val), 3000)
+
     def fit_all(self):
         self.fit_column_widths()
         self.fit_row_heights()
@@ -4855,6 +4978,7 @@ class MainWindow(QMainWindow):
         menu.addAction('在左侧添加列', lambda: self.add_column(col))
         menu.addAction('在右侧添加列', lambda: self.add_column(col + 1))
         if col >= 0:
+            menu.addAction('设置本列列宽…', lambda c=col: self.set_column_width_dialog([c]))
             cd = self.project.columns[col]
             menu.addAction(f'整列填充颜色「{cd["title"]}」…',
                            lambda c=col: self.fill_color_dialog('col', c))
@@ -5117,15 +5241,32 @@ class MainWindow(QMainWindow):
             apply(self.tree.topLevelItem(i), any_collapsed)
         self.status.showMessage('已' + ('展开' if any_collapsed else '折叠') + '全部节点', 2000)
 
-    def toggle_row_highlight(self):
-        """切换选中行高亮：整行选择 / 单元格选择。"""
-        cur = self.table.selectionBehavior()
-        if cur == QAbstractItemView.SelectRows:
-            self.table.setSelectionBehavior(QAbstractItemView.SelectItems)
-            self.status.showMessage('已关闭整行高亮', 2000)
+    def _set_hilite(self, which, on):
+        """统一处理当前行/列高亮开关：状态、设置、按钮外观、重绘。"""
+        on = bool(on)
+        if which == 'row':
+            self._hilite_row = on
+            self._set_setting('hilite_row', on)
         else:
-            self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
-            self.status.showMessage('已开启整行高亮', 2000)
+            self._hilite_col = on
+            self._set_setting('hilite_col', on)
+        btn = (getattr(self, '_hilite_buttons', {}) or {}).get(
+            '选中行高亮' if which == 'row' else '选中列高亮')
+        if btn is not None and btn.isChecked() != on:
+            btn.blockSignals(True)
+            btn.setChecked(on)
+            btn.blockSignals(False)
+        self.table.viewport().update()
+        label = '当前行' if which == 'row' else '当前列'
+        self.status.showMessage(('已开启' if on else '已关闭') + label + '高亮', 2000)
+
+    def toggle_row_highlight(self, checked=None):
+        """开关当前行高亮（淡色底纹，不改选择模式）。"""
+        self._set_hilite('row', (not self._hilite_row) if checked is None else checked)
+
+    def toggle_col_highlight(self, checked=None):
+        """开关当前列高亮（淡色底纹，不改选择模式）。"""
+        self._set_hilite('col', (not self._hilite_col) if checked is None else checked)
 
     def precision_setup(self):
         """自由定制小数精度（工程量显示位数）。"""
