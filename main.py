@@ -32,7 +32,7 @@ from ui_printpreview import PrintPreviewPane
 from core.highlighter import FormulaHighlighter, compute_runs, FCOLOR
 
 APP_NAME = "工程量计算书"
-APP_VER = "2.6.0"
+APP_VER = "2.7.0"
 FILE_EXT = '.gcls'          # 工程文件后缀（内容仍是 JSON，便于排查与迁移）
 
 # ---- 工程文件关联（让资源管理器把 .gcls 显示成软件图标）----
@@ -341,11 +341,12 @@ class PasteTableWidget(QTableWidget):
         if event.matches(QKeySequence.Paste) or (
                 event.modifiers() & Qt.ControlModifier and event.key() == Qt.Key_V):
             text = QApplication.clipboard().text()
-            if text and ('\t' in text or '\n' in text):
-                if self.on_paste:
-                    self.on_paste(text)
+            # 所有粘贴（含单个单元格文本）都走自定义粘贴，锚点统一由主窗口控制，
+            # 避免走 QTableWidget 默认粘贴而错位到编码列。编辑中的单元格不走这里。
+            if text and self.on_paste:
+                self.on_paste(text)
                 return
-        # Insert 在下方插入行，Delete 删除选中行
+        # Insert 在下方插入行，Delete 删除选中内容（整行/整列/单元格由主窗口判断）
         if event.key() == Qt.Key_Insert:
             if self.on_insert:
                 self.on_insert()
@@ -389,7 +390,21 @@ class LiveSyncDelegate(QStyledItemDelegate):
             cb.view().setMinimumWidth(130)
             cb.setToolTip('选择常用单位，或直接输入自定义单位\n'
                           'm/m2/m3/kg 保留2位、t 保留3位、个/块/套/处/台/组 取整')
-            cb.activated[int].connect(lambda _i, ed=cb: self._commit(ed))
+            # activated 在 popup 的鼠标按下处理过程中发出：若此时同步 closeEditor
+            # 销毁弹窗，Qt 后续对 popup 的处理会落空，表现为“选项点不中”。
+            # 延时到事件循环尾部再提交/关闭，popup 先正常收完这一次点击。
+            state = {'done': False}
+
+            def _delayed_commit(ed=cb, st=state):
+                if st['done']:
+                    return
+                st['done'] = True
+                try:
+                    self._commit(ed)
+                except RuntimeError:
+                    pass    # 编辑器可能已被 QTableWidget 正常关闭
+
+            cb.activated[int].connect(lambda _i: QTimer.singleShot(0, _delayed_commit))
             return cb
         editor = super().createEditor(parent, option, index)
         if isinstance(editor, QLineEdit) and key == 'formula':
@@ -406,8 +421,8 @@ class LiveSyncDelegate(QStyledItemDelegate):
     def setEditorData(self, editor, index):
         if isinstance(editor, QComboBox):
             editor.setCurrentText(str(index.data(Qt.EditRole) or ''))
-            if editor.lineEdit() is not None:
-                editor.lineEdit().selectAll()
+            # 不做 selectAll：全选状态下点击弹窗选项在部分 Qt/样式组合下会失效，
+            # 让行编辑保持普通光标即可，弹窗点选与手动输入都正常。
             return
         super().setEditorData(editor, index)
 
@@ -2968,7 +2983,7 @@ class MainWindow(QMainWindow):
         th = QVBoxLayout(table_host)
         th.setContentsMargins(0, 0, 0, 0)
         th.setSpacing(0)
-        self.table = PasteTableWidget(self.paste_text, self.insert_row_below, self.delete_rows)
+        self.table = PasteTableWidget(self.paste_text, self.insert_row_below, self.delete_selection)
         # 自定义表头：用户一旦手动拖列宽，就自动关闭“列宽自适应”，避免布局抢回去
         fhdr = FitHeader(Qt.Horizontal, self.table)
         fhdr.on_manual_resize = self._col_autofit_off
@@ -3869,8 +3884,16 @@ class MainWindow(QMainWindow):
         if not lines:
             return
         rows = [ln.split('\t') for ln in lines]
-        start_row = max(self.table.currentRow(), 0)
-        start_col = max(self.table.currentColumn(), 0)
+        # 粘贴锚点：优先取选中单元格区域的左上角（用户框选备注列再粘贴时，
+        # currentColumn() 可能仍停在编码列或 -1，导致贴错列）。
+        sel = self.table.selectionModel()
+        sel_indexes = sel.selectedIndexes() if sel is not None else []
+        if sel_indexes:
+            start_row = min(i.row() for i in sel_indexes)
+            start_col = min(i.column() for i in sel_indexes)
+        else:
+            start_row = max(self.table.currentRow(), 0)
+            start_col = max(self.table.currentColumn(), 0)
         sec = self.current_section
         need = start_row + len(rows)
         self.push_undo('粘贴')
@@ -4319,18 +4342,89 @@ class MainWindow(QMainWindow):
             self.refresh_table()
             self._dirty = True
 
+    def delete_cells_data(self, *args):
+        """删除选中单元格的数据（保留行列结构），支持框选多个单元格。
+
+        整行 / 整列选中时改由 delete_rows / delete_column 处理结构删除。
+        """
+        sel = self.table.selectionModel()
+        indexes = sel.selectedIndexes() if sel is not None else []
+        # 整行选中 → 删行；整列选中 → 删列；否则按单元格清数据
+        sel_rows = sel.selectedRows() if sel is not None else []
+        sel_cols = sel.selectedColumns() if sel is not None else []
+        if sel_rows and not sel_cols and len(indexes) >= self.table.columnCount():
+            self.delete_rows()
+            return
+        if not indexes:
+            r, c = self.table.currentRow(), self.table.currentColumn()
+            if r < 0 or c < 0:
+                return
+            indexes = [self.table.model().index(r, c)]
+        cols = self.project.columns
+        sec = self.current_section
+        touched = 0
+        self.push_undo('删除单元格数据')
+        self._loading = True
+        try:
+            for idx in indexes:
+                r, c = idx.row(), idx.column()
+                if r < 0 or r >= len(sec.rows) or c < 0 or c >= len(cols):
+                    continue
+                row = sec.rows[r]
+                key = cols[c]['key']
+                if key == 'value':      # 工程量是计算值，随公式重算，不单独清空
+                    continue
+                if key == 'no_count':
+                    row.no_count = False
+                elif hasattr(row, key):
+                    setattr(row, key, '')
+                else:
+                    row.custom.pop(key, None)
+                it = self.table.item(r, c)
+                if it is not None:
+                    if key == 'no_count':
+                        it.setCheckState(Qt.Unchecked)
+                    else:
+                        it.setText('')
+                touched += 1
+        finally:
+            self._loading = False
+        if touched:
+            self.project.recalc()
+            self._update_value_cells()
+            self._dirty = True
+
+    def delete_selection(self, *args):
+        """Delete 快捷键：整行→删行、整列→删列、其余→删选中单元格数据。"""
+        sel = self.table.selectionModel()
+        sel_cols = sel.selectedColumns() if sel is not None else []
+        sel_rows = sel.selectedRows() if sel is not None else []
+        if sel_cols and not sel_rows:
+            cols = sorted({i.column() for i in sel_cols})
+            self.delete_column(cols[0])
+            return
+        if sel_rows and not sel_cols:
+            self.delete_rows()
+            return
+        self.delete_cells_data()
+
     def table_menu(self, pos):
         row = self.table.rowAt(pos.y())
         col = self.table.columnAt(pos.x())
-        # 右键即选中目标行，保证插入/删除针对的是鼠标指的那一行
-        if row >= 0:
-            self.table.setCurrentCell(row, max(col, 0))
-            self.table.selectRow(row)
+        # 若右键落在已选中的区域内，保留用户框选（便于批量删除单元格数据）；
+        # 否则把当前单元格定位到鼠标位置，保证插入/删除针对鼠标所指。
+        hit = self.table.indexAt(pos)
+        in_selection = hit.isValid() and hit in self.table.selectionModel().selectedIndexes()
+        if not in_selection:
+            if row >= 0:
+                self.table.setCurrentCell(row, max(col, 0))
+                self.table.selectRow(row)
         menu = QMenu(self)
         menu.addAction('在上方插入行', self.insert_row_above)
         menu.addAction('在下方插入行', self.insert_row_below)
         menu.addSeparator()
-        menu.addAction('删除选中行  (Delete)', self.delete_rows)
+        menu.addAction('删除单元格数据  (Delete)', self.delete_cells_data)
+        menu.addAction('删除选中行', self.delete_rows)
         menu.addAction('粘贴 WPS 数据  (Ctrl+V)', self.paste_from_clipboard)
         menu.addSeparator()
         menu.addAction('列宽自适应（按内容）', lambda: self.fit_column_widths())
@@ -4356,7 +4450,7 @@ class MainWindow(QMainWindow):
         menu.addAction('在下方插入行', lambda r=row: self.insert_row(r + 1))
         menu.addAction('在末尾追加行', lambda: self.insert_row(self.table.rowCount()))
         menu.addSeparator()
-        menu.addAction('删除本行  (Delete)', self.delete_rows)
+        menu.addAction('删除本行', self.delete_rows)
         color_menu = menu.addMenu('本行底色')
         for name, color in ROW_FILL_PRESETS:
             act = color_menu.addAction(name)
