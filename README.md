@@ -54,7 +54,11 @@
 
 ### 方式一：直接下载可执行文件（推荐给非技术用户）
 
-到 [Releases](https://github.com/li993145/calcbook/releases) 下载 `工程量计算书.exe`，双击运行，免安装。
+到 [Releases](https://github.com/li993145/calcbook/releases/tag/v2.5.0) 下载 `CalcBook-v2.5.0.exe`（即「工程量计算书 V2.5.0」，约 58MB），双击运行，免安装。
+
+> 直链：<https://github.com/li993145/calcbook/releases/download/v2.5.0/CalcBook-v2.5.0.exe>
+>
+> 本版本更新明细见 [RELEASE_NOTES_v2.5.0.md](RELEASE_NOTES_v2.5.0.md)。
 
 ### 方式二：从源码运行
 
