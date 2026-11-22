@@ -30,14 +30,37 @@ STYLE_ICONS = {
     'down': QStyle.SP_ArrowDown,
     'calc': QStyle.SP_DialogApplyButton,
     'export': QStyle.SP_DriveCDIcon,
-    'print': QStyle.SP_FileDialogInfoView,
+    'doc': QStyle.SP_FileDialogInfoView,
     'settings': QStyle.SP_FileDialogContentsView,
     'close': QStyle.SP_DialogCloseButton,
 }
 
 
+def make_printer_icon(size=20, color='#2f5597'):
+    """手绘打印机图标（Qt 没有 SP_PrinterIcon，标准信息图标不像打印机）。"""
+    pm = QPixmap(size, size)
+    pm.fill(Qt.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.Antialiasing)
+    scale = size / 20.0
+    p.scale(scale, scale)
+    pen = QPen(QColor(color))
+    pen.setWidthF(1.3)
+    p.setPen(pen)
+    p.setBrush(QColor('#ffffff'))
+    p.drawRect(5, 2, 10, 6)      # 进纸口上方纸张
+    p.drawRect(3, 8, 14, 6)      # 机身
+    p.drawRect(6, 13, 8, 5)      # 出纸托盘
+    p.setBrush(QColor(color))    # 状态指示灯
+    p.drawEllipse(14, 10, 2, 2)
+    p.end()
+    return QIcon(pm)
+
+
 def make_icon(app, name_or_char, color='#2f5597'):
     """生成小尺寸图标（兔兔风格 16~20px）。"""
+    if name_or_char == 'print':
+        return make_printer_icon(20, color)
     if name_or_char in STYLE_ICONS:
         return app.style().standardIcon(STYLE_ICONS[name_or_char])
     pm = QPixmap(20, 20)

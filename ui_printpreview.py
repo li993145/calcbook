@@ -9,6 +9,7 @@ from PyQt5.QtCore import Qt, QSizeF, QRectF, QSize, pyqtSignal, QTimer
 from PyQt5.QtGui import (
     QPixmap, QPainter, QColor, QPen, QTextDocument, QFont, QCursor, QBrush
 )
+from ui_ribbon import make_icon
 
 # 1cm 对应的文档像素数：Qt 富文本按屏幕逻辑 DPI 排 px（150% 缩放时为 144dpi），
 # 预览画布必须用同一基准，纸张与字号比例才和实际打印一致。
@@ -463,6 +464,7 @@ class PrintPreviewPane(QWidget):
         btn_refresh.clicked.connect(self.refresh)
         bar.addWidget(btn_refresh)
         btn_print = QPushButton('打印')
+        btn_print.setIcon(make_icon(QApplication.instance(), 'print'))
         btn_print.clicked.connect(self.win.print_report)
         bar.addWidget(btn_print)
         bar.addStretch(1)
