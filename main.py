@@ -13,7 +13,7 @@ from PyQt5.QtWidgets import (
     QGridLayout, QRadioButton, QButtonGroup, QColorDialog, QSizePolicy,
     QAbstractItemDelegate, QAbstractButton, QCheckBox, QStyle,
     QStyleOptionViewItem, QStyleOptionButton, QListWidget, QListWidgetItem,
-    QScrollArea, QGroupBox
+    QScrollArea, QGroupBox, QSpinBox
 )
 from PyQt5.QtCore import (Qt, QSettings, QMimeData, QEvent, QTimer, QUrl, QRectF, QPointF,
                           QPoint, QSizeF, QRect, pyqtSignal, QObject, QItemSelectionModel)
@@ -32,7 +32,7 @@ from ui_printpreview import PrintPreviewPane
 from core.highlighter import FormulaHighlighter, compute_runs, FCOLOR
 
 APP_NAME = "工程量计算书"
-APP_VER = "2.8.1"
+APP_VER = "2.8.2"
 FILE_EXT = '.gcls'          # 工程文件后缀（内容仍是 JSON，便于排查与迁移）
 
 # ---- 工程文件关联（让资源管理器把 .gcls 显示成软件图标）----
@@ -465,7 +465,7 @@ class LiveSyncDelegate(QStyledItemDelegate):
 
     # ---------- 绘制 ----------
     def _hilite_color(self, index):
-        """当前列高亮底色：返回 (QColor, alpha) 或 None。不改选择模式，只叠加淡色底纹。"""
+        """当前行 / 列高亮底色：返回 (QColor, alpha) 或 None。不改选择模式，只叠加淡色底纹。"""
         win = getattr(self, 'win', None)
         if win is None:
             return None
@@ -480,13 +480,19 @@ class LiveSyncDelegate(QStyledItemDelegate):
             return None
         try:
             cur = table.currentIndex()
+            row_hit = bool(getattr(win, '_hilite_row', False)
+                           and cur.isValid() and index.row() == cur.row())
             col_hit = bool(getattr(win, '_hilite_col', False)
                            and cur.isValid() and index.column() == cur.column())
         except Exception:
             return None
-        if not col_hit:
-            return None
-        return (QColor('#2f7de0'), 40)       # 当前列：浅蓝
+        if row_hit and col_hit:
+            return (QColor('#2f7de0'), 75)       # 行列交叉：稍深的蓝
+        if row_hit:
+            return (QColor('#f5d000'), 45)       # 当前行：浅黄
+        if col_hit:
+            return (QColor('#2f7de0'), 40)       # 当前列：浅蓝
+        return None
 
     def _overlay_hilite(self, painter, option, index):
         """在单元格绘制完成后叠加半透明高亮色块（不动 QStyle 内部状态，最安全）。"""
@@ -2433,8 +2439,12 @@ class MainWindow(QMainWindow):
         # 行高 / 列宽默认自适应（V2.5）：不用每次手动点“自适应”
         self._row_autofit = self.settings.value('row_autofit', True, type=bool)
         self._col_autofit = self.settings.value('col_autofit', True, type=bool)
-        # 当前列高亮（只加淡色底纹，不改变选择模式，避免影响框选删除、粘贴锚点）
+        # 当前行 / 列高亮（只加淡色底纹，不改变选择模式，避免影响框选删除、粘贴锚点）
+        self._hilite_row = self.settings.value('hilite_row', False, type=bool)
         self._hilite_col = self.settings.value('hilite_col', False, type=bool)
+        # 表格字体（类型取系统字库，大小 6-24；空 = 跟随软件默认微软雅黑）
+        self._font_family = self.settings.value('table_font_family', '') or ''
+        self._font_size = int(self.settings.value('table_font_size', 0) or 0)
         # 撤销 / 恢复：栈里存的是“改动前”的工程快照
         self._undo_stack = []        # [(标签, 快照)]
         self._redo_stack = []
@@ -2462,6 +2472,7 @@ class MainWindow(QMainWindow):
         if getattr(sys, 'frozen', False) and assoc_needs_update():
             register_file_assoc()
         self.build_ui()
+        self._apply_table_font(refit=False)   # 恢复上次设置的表格字体
         # 启动时恢复上次打开的工程（工程名直接显示在标题栏）
         # 测试/调试时可设 CALCBOOK_NO_RESTORE=1 跳过，避免读到用户上次的工程
         restored = False
@@ -2785,12 +2796,18 @@ class MainWindow(QMainWindow):
             pass
         return best or sec
 
-    def build_ui(self):
-        self.setStyleSheet("""
+    def _main_qss(self, table_pt=None):
+        """主窗口样式表。表格字号参数化：表格字体设置（V2.8.2）动态重建，
+        否则 QSS 里写死的 font-size 会覆盖 setFont。"""
+        if table_pt is None:
+            table_pt = getattr(self, '_font_size', 0) or 10
+        return """
             QWidget { font-size: 10pt; }
             QMainWindow { background: #f5f6f8; }
-            QTreeWidget, QTableWidget { background: #ffffff; alternate-background-color: #f7f9fc;
+            QTreeWidget { background: #ffffff; alternate-background-color: #f7f9fc;
                                         font-size: 10pt; }
+            QTableWidget { background: #ffffff; alternate-background-color: #f7f9fc;
+                                        font-size: %dpt; }
             QHeaderView::section { background: #f0e6c8; padding: 4px 5px;
                                    border: 1px solid #d8cfae; font-weight: 500;
                                    font-size: 10pt; color:#4a4020; }
@@ -2805,7 +2822,10 @@ class MainWindow(QMainWindow):
             QLabel { font-size: 10pt; }
             QMenu { font-size: 10pt; }
             QMenu::item { padding: 4px 18px; }
-        """)
+        """ % int(max(6, min(24, table_pt)))
+
+    def build_ui(self):
+        self.setStyleSheet(self._main_qss())
 
         central = QWidget()
         central.setMouseTracking(True)     # 边缘拖拽缩放需要持续收到鼠标移动
@@ -2864,6 +2884,7 @@ class MainWindow(QMainWindow):
                 ('格式', [
                     ('填充颜色', '▤', self.fill_color_dialog, '', False),
                     ('清除填充', '▢', self.clear_fill, '', False),
+                    ('表格字体', 'settings', self.font_setup, '', False),
                 ]),
                 ('计算书', [
                     ('分类汇总', 'calc', self.data_summary, '', True),
@@ -2882,9 +2903,6 @@ class MainWindow(QMainWindow):
                     ('F5 插入()', '( )', lambda: self.insert_bracket('cur'), '', False),
                     ('F6 插入[]', '[ ]', lambda: self.insert_bracket('cur_sq'), '', False),
                     ('F7 末尾[]', '[ ]', lambda: self.insert_bracket('end_sq'), '', False),
-                ]),
-                ('说明', [
-                    ('公式说明', 'doc', self.show_formula_help, '', False),
                 ]),
             ],
             '数据输出': [
@@ -2983,6 +3001,7 @@ class MainWindow(QMainWindow):
             ('打印选中区域', self.set_print_area),
             ('插入函数', self.show_function_picker),
             ('树形显示', self.toggle_tree_expand),
+            ('选中行高亮', self.toggle_row_highlight, self._hilite_row),
             ('选中列高亮', self.toggle_col_highlight, self._hilite_col),
             ('F4 前置()', lambda: self.insert_bracket('pre')),
             ('F5 插入()', lambda: self.insert_bracket('cur')),
@@ -3618,7 +3637,7 @@ class MainWindow(QMainWindow):
         <ul>
         <li>最上面是本程序自绘标题栏：左端一排小图标为「新建 / 打开 / 保存 / 打印」，紧跟着是 软件图标 → 软件名与版本 → 工程文件名称 → <code>&lt;文件存放详细地址&gt;</code>；最右端是最小化 / 最大化 / 关闭。未保存的工程显示 <code>&lt;未保存&gt;</code>。</li>
         <li>标题栏空白处按住可拖动窗口，双击最大化 / 还原；鼠标移到窗口边缘可拖拽调整大小。路径过长时中间省略，鼠标悬停可看全路径。</li>
-        <li>Ribbon 四个页签：<b>计算书编辑</b>（文件、编辑、格式、计算书等）、<b>公式编辑</b>（插入函数、查看公式、重算、括号符号、公式说明）、<b>数据输出</b>（导出、打印、打印预览、页面设置）、<b>关于产品</b>（使用说明、关于产品）。</li>
+        <li>Ribbon 四个页签：<b>计算书编辑</b>（文件、编辑、格式、计算书等）、<b>公式编辑</b>（插入函数、查看公式、重算、括号符号）、<b>数据输出</b>（导出、打印、打印预览、页面设置）、<b>关于产品</b>（使用说明、关于产品）。</li>
         <li>左侧为项目结构树与常量框，中间为公式辅助框、快捷操作行和工作区表格，右侧为分类汇总面板。各面板分割条上有小箭头按钮可收起 / 展开（宽度会被记住）；汇总标题行的「⤢」可隐藏主工作区、放大查看汇总，再点「⤡」还原。</li>
         </ul>
 
@@ -3672,6 +3691,8 @@ class MainWindow(QMainWindow):
         <li><b>自动保存与备份</b>：「计算书」组「选项配置」里可设自动保存开关、间隔（1–120 分钟）和备份目录；到点时若工程有改动会写回主文件，并在备份目录生成带时间戳的副本。</li>
         <li><b>工程文件</b>：保存为 <code>.gcls</code>（内容仍是 JSON 文本，便于排查），包含所有计算书、分部结构、公式、备注、常量、列定义、填充色与页面设置；旧版 .json 工程也能打开。软件启动会自动打开上次使用的工程。</li>
         <li><b>常用快捷键</b>：Ctrl+N 新建、Ctrl+O 打开、Ctrl+S 保存、Ctrl+P 打印、Ctrl+F 查找、Ctrl+C / X / V 复制 / 剪切 / 粘贴、Delete 清除单元格内容、Insert 插入行、Ctrl+Z / Ctrl+Y 撤销 / 恢复、F4–F7 插入括号、F9 重算、Ctrl+Enter 确认公式。</li>
+        <li><b>行 / 列高亮</b>：表格上方快捷操作行的「选中行高亮」「选中列高亮」两个开关——当前行加淡黄底纹、当前列加淡蓝底纹，可同时开（交叉处稍深）；只加底纹，不影响框选、删除与粘贴。</li>
+        <li><b>表格字体</b>：功能区「计算书编辑 → 格式 → 表格字体」，字体类型来自电脑系统字库（宋体、黑体、仿宋、楷体等），字号 6–24；确定后表格行高 / 列宽按新字体自动重排，设置会记住，下次启动自动恢复。</li>
         </ul>
         """
 
@@ -3963,11 +3984,11 @@ class MainWindow(QMainWindow):
         self.refresh_table()
 
     def on_cell_cursor(self, row, col, prev_row, prev_col):
-        """选中单元格：公式列联动辅助框，双向同步；列高亮随光标重绘。"""
+        """选中单元格：公式列联动辅助框，双向同步；行 / 列高亮随光标重绘。"""
         if self._loading:
             return
-        # 列高亮需要跟着当前单元格重绘（委托在 paint 时读取 currentIndex）
-        if getattr(self, '_hilite_col', False):
+        # 行 / 列高亮需要跟着当前单元格重绘（委托在 paint 时读取 currentIndex）
+        if getattr(self, '_hilite_row', False) or getattr(self, '_hilite_col', False):
             self.table.viewport().update()
         is_formula_col = (self.col_key(col) == 'formula')
         if is_formula_col and 0 <= row < len(self.current_section.rows):
@@ -5373,22 +5394,112 @@ class MainWindow(QMainWindow):
             apply(self.tree.topLevelItem(i), any_collapsed)
         self.status.showMessage('已' + ('展开' if any_collapsed else '折叠') + '全部节点', 2000)
 
-    def _set_hilite(self, on):
-        """统一处理当前列高亮开关：状态、设置、按钮外观、重绘。"""
+    def _set_hilite(self, which, on):
+        """统一处理当前行 / 列高亮开关：状态、设置、按钮外观、重绘。"""
         on = bool(on)
-        self._hilite_col = on
-        self._set_setting('hilite_col', on)
-        btn = (getattr(self, '_hilite_buttons', {}) or {}).get('选中列高亮')
+        if which == 'row':
+            self._hilite_row = on
+            self._set_setting('hilite_row', on)
+        else:
+            self._hilite_col = on
+            self._set_setting('hilite_col', on)
+        btn = (getattr(self, '_hilite_buttons', {}) or {}).get(
+            '选中行高亮' if which == 'row' else '选中列高亮')
         if btn is not None and btn.isChecked() != on:
             btn.blockSignals(True)
             btn.setChecked(on)
             btn.blockSignals(False)
         self.table.viewport().update()
-        self.status.showMessage(('已开启' if on else '已关闭') + '当前列高亮', 2000)
+        label = '当前行' if which == 'row' else '当前列'
+        self.status.showMessage(('已开启' if on else '已关闭') + label + '高亮', 2000)
+
+    def toggle_row_highlight(self, checked=None):
+        """开关当前行高亮（淡色底纹，不改选择模式）。"""
+        self._set_hilite('row', (not self._hilite_row) if checked is None else checked)
 
     def toggle_col_highlight(self, checked=None):
         """开关当前列高亮（淡色底纹，不改选择模式）。"""
-        self._set_hilite((not self._hilite_col) if checked is None else checked)
+        self._set_hilite('col', (not self._hilite_col) if checked is None else checked)
+
+    def _apply_table_font(self, family=None, size=None, refit=True):
+        """把表格字体应用到工作区（单元格委托、行高自适应都以 table.font() 为基准）。
+
+        注意：主窗口 QSS 里 QTableWidget 的 font-size 需要同步重建，
+        否则样式表会覆盖 setFont 的字号（V2.8.2 踩坑）。
+        """
+        if family is None:
+            family = getattr(self, '_font_family', '')
+            size = getattr(self, '_font_size', 0)
+        try:
+            size = int(size)
+        except Exception:
+            size = 0
+        table = getattr(self, 'table', None)
+        if table is None:
+            return
+        if not family:
+            # 没设过字体：恢复软件默认（微软雅黑 10pt）
+            family = '微软雅黑'
+            size = 10
+        size = max(6, min(24, size))
+        table.setFont(QFont(family, size))
+        # 主窗口样式表里 QTableWidget 的 font-size 跟着改
+        try:
+            self.setStyleSheet(self._main_qss(size))
+        except Exception:
+            log_exception('表格字体样式表更新')
+        if refit:
+            try:
+                if getattr(self, '_col_autofit', False):
+                    self._auto_size_columns()
+                if getattr(self, '_row_autofit', False):
+                    self._apply_row_height_mode()
+                table.viewport().update()
+            except Exception:
+                log_exception('表格字体应用后重排')
+
+    def font_setup(self):
+        """设置表格字体：字体类型来自系统字库（宋体/黑体/仿宋等），大小 6-24。"""
+        from PyQt5.QtGui import QFontDatabase
+        cur = self.table.font()
+        dlg = QDialog(self)
+        dlg.setWindowTitle('表格字体')
+        v = QVBoxLayout(dlg)
+        form = QFormLayout()
+        fam = QComboBox()
+        families = QFontDatabase().families()
+        fam.addItems(families)
+        fam.setEditable(True)
+        fam.setInsertPolicy(QComboBox.NoInsert)
+        if cur.family() in families:
+            fam.setCurrentText(cur.family())
+        else:
+            fam.setEditText(cur.family())
+        size = QSpinBox()
+        size.setRange(6, 24)
+        size.setValue(max(6, cur.pointSize() if cur.pointSize() > 0 else 10))
+        form.addRow('字体：', fam)
+        form.addRow('大小：', size)
+        v.addLayout(form)
+        tip = QLabel('更改应用到工作区表格，行高 / 列宽会按新字体自动重排')
+        tip.setStyleSheet('color:#889; font-size:8.5pt;')
+        v.addWidget(tip)
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.accepted.connect(dlg.accept)
+        bb.rejected.connect(dlg.reject)
+        v.addWidget(bb)
+        if dlg.exec_() != QDialog.Accepted:
+            return
+        family = fam.currentText().strip()
+        pt = int(size.value())
+        if not family:
+            return
+        self._font_family = family
+        self._font_size = pt
+        self._set_setting('table_font_family', family)
+        self._set_setting('table_font_size', pt)
+        self._apply_table_font(family, pt)
+        self.status.showMessage('表格字体已设为 %s %d 号' % (family, pt), 3000)
 
     def precision_setup(self):
         """自由定制小数精度（工程量显示位数）。"""
