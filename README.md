@@ -1,7 +1,7 @@
 # 工程量计算书 CalcBook
 
 > 基于 **Python + PyQt5** 的建筑工程量计算书工具 —— 分层目录、公式自动计算、单位精度控制、打印导出。
-> 当前版本：**V2.7.3**
+> 当前版本：**V2.8.0**
 
 ![主界面](docs/screenshot-main.png)
 
@@ -9,14 +9,16 @@
 
 ## 本次修订（2026-11-22）
 
+- **定点清除单元格内容**：单选 / 框选单元格右键「清除单元格内容」或按 Delete，只清空选中单元格，不再误删整行整列。
+- **打印选中区域**：工具栏「设置打印区域 / 清除打印区域」与快捷栏「打印选中区域」，只打印框选的行列范围。
+- **页脚三栏签字栏**：页面设置新增页脚左 / 中 / 右输入，可放编制人、复核人、日期等；每页自动显示「第 X 页，共 Y 页」。
+- **分类汇总列宽可拖动**：修复项目名称列不能拖动宽度的问题，所有列宽均可调并持久化；新增「放大汇总」按钮，可隐藏主工作区。
+- **打印机图标**：标题栏、功能区与打印预览里的打印按钮统一改成打印机造型。
 - **按钮中文化**：所有弹窗的 `OK` / `Cancel` 统一显示为「确定」/「取消」。
 - **取消选中行高亮**：该按钮及绘制逻辑暂时移除；「选中列高亮」保留。
-- **打印机图标**：标题栏、功能区与打印预览里的打印按钮统一改成打印机造型，查看公式 / 说明改用文档图标。
-- **自定义行高 / 列宽**：行号右键「设置本行行高…」、表头右键「设置本列列宽…」，单元格右键也能设置选中行 / 列，可直接输入像素值；手动设定后不再被自动铺满覆盖。
-- **粘贴自动加行**：粘贴的数据行数超过现有行数时自动在末尾补足空行，不用再手动逐行右键添加。双击单元格进入编辑态后粘贴多行数据同样生效。
-- **修复粘贴错位**：从 WPS / Excel 复制数据点选备注列再粘贴，不再偶尔贴到编码列；粘贴起点统一取选中区域的左上角。
-- **单元格数据删除**：框选单元格后右键「删除单元格数据」或按 **Delete** 键即可清空内容（保留行列结构、可撤销）；整行 / 整列选中时按 Delete 仍删除整行 / 整列。
-- **修复单位下拉选不中**：进一步加固——弹窗事件放行、延时提交、去掉全选干扰，单位下拉选项可稳定选中。
+- **粘贴自动加行**：粘贴的数据行数超过现有行数时自动在末尾补足空行；编辑态多行粘贴同样生效。
+- **修复粘贴错位**：粘贴起点统一取选中区域的左上角。
+- **修复单位下拉选不中**：弹窗事件放行、延时提交、去掉全选干扰。
 
 ### V2.6.0
 
@@ -73,13 +75,15 @@
 
 ### 方式一：直接下载可执行文件（推荐给非技术用户）
 
-到 [Releases](https://github.com/li993145/calcbook/releases/tag/v2.7.3) 下载 `CalcBook-v2.7.3.exe`（即「工程量计算书 V2.7.3」，约 56MB），双击运行，免安装。
+下载 `CalcBook-v2.8.0.exe`（约 56MB），双击运行，免安装：
 
-> 直链：<https://github.com/li993145/calcbook/releases/download/v2.7.3/CalcBook-v2.7.3.exe>
+- **Gitee 仓库直接下载（推荐国内用户）**：<https://gitee.com/li993145/calcbook/raw/main/CalcBook-v2.8.0.exe>
+- [Gitee Release](https://gitee.com/li993145/calcbook/releases/tag/v2.8.0)
+- [GitHub Release](https://github.com/li993145/calcbook/releases/tag/v2.8.0)
+
+> 本版本更新明细见 [RELEASE_NOTES_v2.8.0.md](RELEASE_NOTES_v2.8.0.md)。
 >
-> 本版本更新明细见 [RELEASE_NOTES_v2.7.3.md](RELEASE_NOTES_v2.7.3.md)。
->
-> 历史版本：[V2.7.2](https://github.com/li993145/calcbook/releases/tag/v2.7.2)（[更新明细](RELEASE_NOTES_v2.7.2.md)）、[V2.7.1](https://github.com/li993145/calcbook/releases/tag/v2.7.1)（[更新明细](RELEASE_NOTES_v2.7.1.md)）、[V2.7.0](https://github.com/li993145/calcbook/releases/tag/v2.7.0)（[更新明细](RELEASE_NOTES_v2.7.0.md)）、[V2.6.0](https://github.com/li993145/calcbook/releases/tag/v2.6.0)（[更新明细](RELEASE_NOTES_v2.6.0.md)）、[V2.5.0](https://github.com/li993145/calcbook/releases/tag/v2.5.0)（[更新明细](RELEASE_NOTES_v2.5.0.md)）。
+> 历史版本：[V2.7.3](https://gitee.com/li993145/calcbook/releases/tag/v2.7.3)（[更新明细](RELEASE_NOTES_v2.7.3.md)）、[V2.7.2](https://github.com/li993145/calcbook/releases/tag/v2.7.2)（[更新明细](RELEASE_NOTES_v2.7.2.md)）、[V2.7.1](https://github.com/li993145/calcbook/releases/tag/v2.7.1)（[更新明细](RELEASE_NOTES_v2.7.1.md)）、[V2.7.0](https://github.com/li993145/calcbook/releases/tag/v2.7.0)（[更新明细](RELEASE_NOTES_v2.7.0.md)）、[V2.6.0](https://github.com/li993145/calcbook/releases/tag/v2.6.0)（[更新明细](RELEASE_NOTES_v2.6.0.md)）、[V2.5.0](https://github.com/li993145/calcbook/releases/tag/v2.5.0)（[更新明细](RELEASE_NOTES_v2.5.0.md)）。
 
 ### 方式二：从源码运行
 

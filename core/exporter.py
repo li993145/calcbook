@@ -169,11 +169,16 @@ def export_xlsx(project, path, precision=3, report=None):
         ws.column_dimensions[get_column_letter(j)].width = max(8, round(w / 7))
     ws.freeze_panes = f'A{hr+1}'
 
-    # 页脚（放到最末行下面两行）
-    if report.get('footer'):
+    # 页脚左 / 中 / 右（兼容旧版单一 footer 字段）
+    fl = str(report.get('footer_left', '') or '')
+    fc = str(report.get('footer_center', '') or '')
+    fr_txt = str(report.get('footer_right', '') or '')
+    if not (fl or fc or fr_txt):
+        fc = str(report.get('footer', '') or '')
+    if fl or fc or fr_txt:
         fr = r + 1
         ws.merge_cells(f'A{fr}:{last_letter}{fr}')
-        c = ws.cell(fr, 1, report['footer'])
+        c = ws.cell(fr, 1, '   '.join(x for x in (fl, fc, fr_txt) if x))
         c.font = Font(name='微软雅黑', size=9, color='7F7F7F')
         c.alignment = Alignment(horizontal='center', vertical='center')
 
@@ -198,7 +203,10 @@ def export_xlsx(project, path, precision=3, report=None):
         ws.page_setup.orientation = ('landscape' if report.get('orientation') == 'landscape'
                                      else 'portrait')
         ws.oddHeader.center.text = report.get('header', '')
-        ws.oddFooter.center.text = report.get('footer', '')
+        page_no = '第 &P 页，共 &N 页'
+        ws.oddFooter.left.text = fl
+        ws.oddFooter.center.text = (fc + '  ' + page_no) if fc else page_no
+        ws.oddFooter.right.text = fr_txt
         ws.print_title_rows = f'{hr}:{hr}'      # 每页重复表头
     except Exception:
         pass

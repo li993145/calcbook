@@ -124,6 +124,7 @@ class Project:
         self.columns = [dict(c) for c in DEFAULT_COLUMNS]   # 列定义（可增删）
         self.report = {       # 报表设置
             'title': '', 'header': '', 'footer': '',
+            'footer_left': '', 'footer_center': '', 'footer_right': '',
             'margin': 1.9, 'halign': 'left', 'valign': 'center',
             # 纸张（mm）：默认 A4，可在页面设置里按打印机支持的纸张选择
             'paper': {'name': 'A4', 'w': 210.0, 'h': 297.0},
