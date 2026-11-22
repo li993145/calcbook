@@ -12,13 +12,12 @@
 6. **分类汇总放大按钮**：汇总面板标题行新增「⤢」放大按钮，点击后隐藏主工作区，让分类汇总占满窗口；再点「⤡」还原。
 7. **打印机图标**：标题栏、功能区、预览窗口的打印按钮统一换成打印机造型。
 8. **截图脱敏**：文档截图全部改用「示例工程」和虚构路径，不再出现真实工程名。
-9. **Gitee 直接下载**：Gitee 仓库根目录和 Release 均提供 `CalcBook-v2.8.0.exe`，不会打包的用户可直接下载使用。
+9. **Gitee 直接下载**：Gitee Release 提供 `CalcBook-v2.8.0.exe` 附件，不会打包的用户可直接下载使用。
 
 ## 下载
 
 - GitHub Release：https://github.com/li993145/calcbook/releases/tag/v2.8.0
 - Gitee Release：https://gitee.com/li993145/calcbook/releases/tag/v2.8.0
-- Gitee 仓库直接下载：https://gitee.com/li993145/calcbook/raw/main/CalcBook-v2.8.0.exe
 - Windows exe：`CalcBook-v2.8.0.exe`
 
 ## 校验
