@@ -32,7 +32,7 @@ from ui_printpreview import PrintPreviewPane
 from core.highlighter import FormulaHighlighter, compute_runs, FCOLOR
 
 APP_NAME = "工程量计算书"
-APP_VER = "2.7.2"
+APP_VER = "2.7.3"
 FILE_EXT = '.gcls'          # 工程文件后缀（内容仍是 JSON，便于排查与迁移）
 
 # ---- 工程文件关联（让资源管理器把 .gcls 显示成软件图标）----
@@ -41,6 +41,37 @@ ASSOC_DESC = '工程量计算书工程文件'
 
 # ---- 错误日志：打包成 exe 后没有控制台，异常写到这里便于排查 ----
 LOG_FILE = os.path.join(tempfile.gettempdir(), 'calcbook_error.log')
+
+# ---- 对话框按钮中文化：Qt 未加载中文翻译时，标准按钮会显示英文 ----
+_DIALOG_BUTTON_TEXT = {
+    'ok': '确定', 'cancel': '取消', 'yes': '是', 'no': '否',
+    'close': '关闭', 'apply': '应用', 'save': '保存',
+    'discard': '放弃', 'reset': '重置', 'help': '帮助',
+}
+
+
+def localize_dialog_buttons(dialog):
+    """把对话框里的 OK / Cancel 等标准按钮文字统一改成中文。"""
+    try:
+        for btn in dialog.findChildren(QAbstractButton):
+            text = btn.text()
+            key = text.replace('&', '').replace('...', '').replace('…', '').strip().lower()
+            zh = _DIALOG_BUTTON_TEXT.get(key)
+            if zh and zh != text:
+                btn.setText(zh)
+    except Exception:
+        pass
+
+
+class DialogButtonI18nFilter(QObject):
+    """应用级过滤器：任何弹窗显示时都把英文标准按钮换成中文。"""
+
+    def eventFilter(self, obj, ev):
+        if ev.type() == QEvent.Show and isinstance(obj, QDialog):
+            localize_dialog_buttons(obj)
+            # 少数对话框（QInputDialog 等）显示后还会补建按钮，下一轮事件再刷一次
+            QTimer.singleShot(0, lambda dlg=obj: localize_dialog_buttons(dlg))
+        return super().eventFilter(obj, ev)
 
 
 def log_exception(tag=''):
@@ -434,7 +465,7 @@ class LiveSyncDelegate(QStyledItemDelegate):
 
     # ---------- 绘制 ----------
     def _hilite_color(self, index):
-        """当前行 / 列高亮底色：返回 (QColor, alpha) 或 None。不改选择模式，只叠加淡色底纹。"""
+        """当前列高亮底色：返回 (QColor, alpha) 或 None。不改选择模式，只叠加淡色底纹。"""
         win = getattr(self, 'win', None)
         if win is None:
             return None
@@ -449,18 +480,12 @@ class LiveSyncDelegate(QStyledItemDelegate):
             return None
         try:
             cur = table.currentIndex()
-            row_hit = bool(getattr(win, '_hilite_row', False)
-                           and cur.isValid() and index.row() == cur.row())
             col_hit = bool(getattr(win, '_hilite_col', False)
                            and cur.isValid() and index.column() == cur.column())
         except Exception:
             return None
-        if not (row_hit or col_hit):
+        if not col_hit:
             return None
-        if row_hit and col_hit:
-            return (QColor('#f2c800'), 70)   # 当前单元格：稍深的黄
-        if row_hit:
-            return (QColor('#f5d000'), 45)   # 当前行：浅黄
         return (QColor('#2f7de0'), 40)       # 当前列：浅蓝
 
     def _overlay_hilite(self, painter, option, index):
@@ -1619,7 +1644,7 @@ class MultiSummaryDialog(QDialog):
         v.addLayout(match)
 
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        bb.button(QDialogButtonBox.Ok).setText('应用')
+        bb.button(QDialogButtonBox.Ok).setText('确定')
         bb.button(QDialogButtonBox.Cancel).setText('取消')
         bb.accepted.connect(self.accept)
         bb.rejected.connect(self.reject)
@@ -2023,6 +2048,8 @@ class ProjectInfoDialog(QDialog):
         if for_new:
             self.edits['proj_name'].selectAll()
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.button(QDialogButtonBox.Ok).setText('确定')
+        bb.button(QDialogButtonBox.Cancel).setText('取消')
         bb.accepted.connect(self.accept)
         bb.rejected.connect(self.reject)
         layout.addWidget(bb)
@@ -2337,8 +2364,7 @@ class MainWindow(QMainWindow):
         # 行高 / 列宽默认自适应（V2.5）：不用每次手动点“自适应”
         self._row_autofit = self.settings.value('row_autofit', True, type=bool)
         self._col_autofit = self.settings.value('col_autofit', True, type=bool)
-        # 当前行 / 列高亮（只加淡色底纹，不改变选择模式，避免影响框选删除、粘贴锚点）
-        self._hilite_row = self.settings.value('hilite_row', True, type=bool)
+        # 当前列高亮（只加淡色底纹，不改变选择模式，避免影响框选删除、粘贴锚点）
         self._hilite_col = self.settings.value('hilite_col', False, type=bool)
         # 撤销 / 恢复：栈里存的是“改动前”的工程快照
         self._undo_stack = []        # [(标签, 快照)]
@@ -2780,7 +2806,7 @@ class MainWindow(QMainWindow):
                 ('公式', [
                     ('写入公式', 'calc', self.apply_formula_help, 'Ctrl+Enter', True),
                     ('插入函数', 'settings', self.show_functions, '', True),
-                    ('查看公式', 'print', self.view_formula, '', False),
+                    ('查看公式', 'doc', self.view_formula, '', False),
                     ('重算', 'calc', self.recalc_all, 'F9', True),
                 ]),
                 ('括号符号', [
@@ -2790,7 +2816,7 @@ class MainWindow(QMainWindow):
                     ('F7 末尾[]', '[ ]', lambda: self.insert_bracket('end_sq'), '', False),
                 ]),
                 ('说明', [
-                    ('公式说明', 'print', self.show_formula_help, '', False),
+                    ('公式说明', 'doc', self.show_formula_help, '', False),
                 ]),
             ],
             '数据输出': [
@@ -2806,7 +2832,7 @@ class MainWindow(QMainWindow):
             ],
             '关于产品': [
                 ('关于', [
-                    ('使用说明', 'print', self.show_formula_help, '', True),
+                    ('使用说明', 'doc', self.show_formula_help, '', True),
                     ('关于产品', 'settings', self.show_about, '', False),
                 ]),
             ],
@@ -2888,7 +2914,6 @@ class MainWindow(QMainWindow):
             ('分类汇总', self.data_summary),
             ('插入函数', self.show_function_picker),
             ('树形显示', self.toggle_tree_expand),
-            ('选中行高亮', self.toggle_row_highlight, self._hilite_row),
             ('选中列高亮', self.toggle_col_highlight, self._hilite_col),
             ('F4 前置()', lambda: self.insert_bracket('pre')),
             ('F5 插入()', lambda: self.insert_bracket('cur')),
@@ -2914,7 +2939,7 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
             if len(item) >= 3:
-                # 可勾选开关（行/列高亮）：用 toggled 传勾选态，按钮外观即启用状态
+                # 可勾选开关（列高亮）：用 toggled 传勾选态，按钮外观即启用状态
                 b.setCheckable(True)
                 b.setChecked(bool(item[2]))
                 self._hilite_buttons[text] = b
@@ -3821,11 +3846,11 @@ class MainWindow(QMainWindow):
         self.refresh_table()
 
     def on_cell_cursor(self, row, col, prev_row, prev_col):
-        """选中单元格：公式列联动辅助框，双向同步；行/列高亮随光标重绘。"""
+        """选中单元格：公式列联动辅助框，双向同步；列高亮随光标重绘。"""
         if self._loading:
             return
-        # 行/列高亮需要跟着当前单元格重绘（委托在 paint 时读取 currentIndex）
-        if getattr(self, '_hilite_row', False) or getattr(self, '_hilite_col', False):
+        # 列高亮需要跟着当前单元格重绘（委托在 paint 时读取 currentIndex）
+        if getattr(self, '_hilite_col', False):
             self.table.viewport().update()
         is_formula_col = (self.col_key(col) == 'formula')
         if is_formula_col and 0 <= row < len(self.current_section.rows):
@@ -4267,6 +4292,8 @@ class MainWindow(QMainWindow):
         b_def.clicked.connect(lambda: (lst.clear(), [lst.addItem(QListWidgetItem(x))
                                                      for x in DEFAULT_LEVELS]))
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.button(QDialogButtonBox.Ok).setText('确定')
+        bb.button(QDialogButtonBox.Cancel).setText('取消')
         bb.accepted.connect(dlg.accept)
         bb.rejected.connect(dlg.reject)
         v.addWidget(bb)
@@ -5241,32 +5268,22 @@ class MainWindow(QMainWindow):
             apply(self.tree.topLevelItem(i), any_collapsed)
         self.status.showMessage('已' + ('展开' if any_collapsed else '折叠') + '全部节点', 2000)
 
-    def _set_hilite(self, which, on):
-        """统一处理当前行/列高亮开关：状态、设置、按钮外观、重绘。"""
+    def _set_hilite(self, on):
+        """统一处理当前列高亮开关：状态、设置、按钮外观、重绘。"""
         on = bool(on)
-        if which == 'row':
-            self._hilite_row = on
-            self._set_setting('hilite_row', on)
-        else:
-            self._hilite_col = on
-            self._set_setting('hilite_col', on)
-        btn = (getattr(self, '_hilite_buttons', {}) or {}).get(
-            '选中行高亮' if which == 'row' else '选中列高亮')
+        self._hilite_col = on
+        self._set_setting('hilite_col', on)
+        btn = (getattr(self, '_hilite_buttons', {}) or {}).get('选中列高亮')
         if btn is not None and btn.isChecked() != on:
             btn.blockSignals(True)
             btn.setChecked(on)
             btn.blockSignals(False)
         self.table.viewport().update()
-        label = '当前行' if which == 'row' else '当前列'
-        self.status.showMessage(('已开启' if on else '已关闭') + label + '高亮', 2000)
-
-    def toggle_row_highlight(self, checked=None):
-        """开关当前行高亮（淡色底纹，不改选择模式）。"""
-        self._set_hilite('row', (not self._hilite_row) if checked is None else checked)
+        self.status.showMessage(('已开启' if on else '已关闭') + '当前列高亮', 2000)
 
     def toggle_col_highlight(self, checked=None):
         """开关当前列高亮（淡色底纹，不改选择模式）。"""
-        self._set_hilite('col', (not self._hilite_col) if checked is None else checked)
+        self._set_hilite((not self._hilite_col) if checked is None else checked)
 
     def precision_setup(self):
         """自由定制小数精度（工程量显示位数）。"""
@@ -6051,6 +6068,8 @@ class MainWindow(QMainWindow):
         lbl.setStyleSheet('color:#666;')
         form.addRow(lbl)
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.button(QDialogButtonBox.Ok).setText('确定')
+        bb.button(QDialogButtonBox.Cancel).setText('取消')
         bb.accepted.connect(dlg.accept)
         bb.rejected.connect(dlg.reject)
         form.addRow(bb)
@@ -6325,6 +6344,9 @@ def main():
 
     app = QApplication(sys.argv)
     app.setFont(QFont('微软雅黑', 10))
+    # 所有弹窗的 OK / Cancel 等按钮统一显示中文
+    app._calcbook_i18n_filter = DialogButtonI18nFilter(app)
+    app.installEventFilter(app._calcbook_i18n_filter)
     # 任务栏使用本程序自己的图标与分组（否则会跟 python.exe 混在一起）
     try:
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
