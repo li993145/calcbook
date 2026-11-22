@@ -32,7 +32,7 @@ from ui_printpreview import PrintPreviewPane
 from core.highlighter import FormulaHighlighter, compute_runs, FCOLOR
 
 APP_NAME = "工程量计算书"
-APP_VER = "2.5.0"
+APP_VER = "2.6.0"
 FILE_EXT = '.gcls'          # 工程文件后缀（内容仍是 JSON，便于排查与迁移）
 
 # ---- 工程文件关联（让资源管理器把 .gcls 显示成软件图标）----
@@ -2494,6 +2494,14 @@ class MainWindow(QMainWindow):
     def eventFilter(self, obj, ev):
         """应用级事件过滤：窗口边缘的拖拽缩放 + 指针形状。"""
         try:
+            # 独立弹窗（单位下拉框、菜单、提示气泡等）不能参与主窗口的边缘缩放：
+            # 弹窗是独立顶层窗口，其选项若恰好落在主窗口边缘 6px 内，点击会被
+            # 下面的边缘检测 return True 吃掉，表现为“下拉选项点不中”。
+            # 主窗口自身及其子控件（标题栏等）的 window() 就是 self，照常处理。
+            if isinstance(obj, QWidget):
+                top = obj.window()
+                if top is not None and top is not self:
+                    return False
             et = ev.type()
             if et == QEvent.MouseButtonPress and ev.button() == Qt.LeftButton:
                 if not self._maximized:

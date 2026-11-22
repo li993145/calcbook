@@ -1,7 +1,7 @@
 # 工程量计算书 CalcBook
 
 > 基于 **Python + PyQt5** 的建筑工程量计算书工具 —— 分层目录、公式自动计算、单位精度控制、打印导出。
-> 当前版本：**V2.5.0**
+> 当前版本：**V2.6.0**
 
 ![主界面](docs/screenshot-main.png)
 
@@ -12,6 +12,7 @@
 - **公式列自动换行**：长公式现在按当前列宽折行显示，行高随内容自动撑高；拖动列宽 / 行高后文字立即重新排版，不再被省略号截断。公式里的空格、英文字母等无颜色字符也不再丢失。
 - **打印沿用界面尺寸**：报表的列宽比例直接取表格当前列宽（含手动拖动后的宽度），行高也按界面当前行高输出；打印预览与真实打印保持一致。
 - **分类汇总多条件**：保留原来的「按编号 / 项目名称 / 部位 / 分部 / 单位」单条件汇总，新增「多条件…」设置——可多选分组字段（如 部位 + 单位），并可叠加多条筛选条件（包含 / 不包含 / 等于 / 不等于 / 为空 / 不为空，支持「满足全部」或「满足任一」）。点「单条件」即可切回原模式。
+- **修复单位下拉选不中**：修复下拉选项偶尔点不中的问题（窗口边缘缩放过滤器误伤了下拉弹窗的点击）。
 
 ---
 
@@ -62,11 +63,13 @@
 
 ### 方式一：直接下载可执行文件（推荐给非技术用户）
 
-到 [Releases](https://github.com/li993145/calcbook/releases/tag/v2.5.0) 下载 `CalcBook-v2.5.0.exe`（即「工程量计算书 V2.5.0」，约 58MB），双击运行，免安装。
+到 [Releases](https://github.com/li993145/calcbook/releases/tag/v2.6.0) 下载 `CalcBook-v2.6.0.exe`（即「工程量计算书 V2.6.0」，约 56MB），双击运行，免安装。
 
-> 直链：<https://github.com/li993145/calcbook/releases/download/v2.5.0/CalcBook-v2.5.0.exe>
+> 直链：<https://github.com/li993145/calcbook/releases/download/v2.6.0/CalcBook-v2.6.0.exe>
 >
-> 本版本更新明细见 [RELEASE_NOTES_v2.5.0.md](RELEASE_NOTES_v2.5.0.md)。
+> 本版本更新明细见 [RELEASE_NOTES_v2.6.0.md](RELEASE_NOTES_v2.6.0.md)。
+>
+> 历史版本：[V2.5.0](https://github.com/li993145/calcbook/releases/tag/v2.5.0)（[更新明细](RELEASE_NOTES_v2.5.0.md)）。
 
 ### 方式二：从源码运行
 
