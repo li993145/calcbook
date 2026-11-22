@@ -54,12 +54,12 @@
 
 ### 方式一：直接下载可执行文件（推荐给非技术用户）
 
-到 [Releases](https://github.com/<你的账号>/calcbook/releases) 下载 `工程量计算书.exe`，双击运行，免安装。
+到 [Releases](https://github.com/li993145/calcbook/releases) 下载 `工程量计算书.exe`，双击运行，免安装。
 
 ### 方式二：从源码运行
 
 ```bash
-git clone https://github.com/<你的账号>/calcbook.git
+git clone https://github.com/li993145/calcbook.git
 cd calcbook
 pip install -r requirements.txt
 python main.py
