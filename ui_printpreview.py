@@ -78,14 +78,22 @@ class ReportRenderer:
     3) 绘制每一页时先画头部，再画该页正文切片 —— 于是每页都有表头。
     """
 
-    def __init__(self, head_html, body_html, content_w, content_h):
+    def __init__(self, head_html, body_html, content_w, content_h,
+                 footer_left='', footer_center='', footer_right='', show_page_no=True):
         self.content_w = max(40.0, float(content_w))
         self.content_h = max(40.0, float(content_h))
-        # 正文每页的高度 = 可用高度 - 头部高度（头部每页都要留出来）
+        self.footer_left = footer_left or ''
+        self.footer_center = footer_center or ''
+        self.footer_right = footer_right or ''
+        self.show_page_no = bool(show_page_no)
+        # 页脚占用正文可用高度，保证打印与预览都不会压到表格内容
+        self.footer_h = 30.0 if (self.footer_left or self.footer_center or
+                                 self.footer_right or self.show_page_no) else 0.0
+        # 正文每页的高度 = 可用高度 - 头部高度 - 页脚高度
         self.head = self._make_doc(head_html, QSizeF(self.content_w, max(self.content_h, 1000.0)))
         self.body = self._make_doc(body_html, QSizeF(self.content_w, 1000.0))
         self.head_h = self._measure(self.head)
-        self.body_page_h = max(40.0, self.content_h - self.head_h)
+        self.body_page_h = max(40.0, self.content_h - self.head_h - self.footer_h)
         # 正文按“每页可用高度”重新排版，分页才和纸张对得上
         self.body.setPageSize(QSizeF(self.content_w, self.body_page_h))
         self.page_count = max(1, self.body.documentLayout().pageCount())
@@ -130,6 +138,28 @@ class ReportRenderer:
         top = index * self.body_page_h
         self._draw_slice(self.body, painter,
                          QRectF(0, top, self.content_w, self.body_page_h), self.head_h)
+        # 页脚：左 / 中 / 右三栏，中间固定带“第 X 页，共 Y 页”
+        if self.footer_h:
+            self._draw_footer(painter, index)
+        painter.restore()
+
+    def _draw_footer(self, painter, index):
+        """页脚：左签字栏、中间页码、右签字栏。"""
+        y = self.content_h - self.footer_h
+        third = self.content_w / 3.0
+        painter.save()
+        painter.setClipRect(QRectF(0, y, self.content_w, self.footer_h))
+        font = QFont('微软雅黑', 8)
+        painter.setFont(font)
+        painter.setPen(QColor('#666666'))
+        painter.drawText(QRectF(6, y, third - 12, self.footer_h),
+                         Qt.AlignLeft | Qt.AlignVCenter, self.footer_left)
+        page_no = '第 %d 页，共 %d 页' % (index + 1, self.page_count)
+        center_text = (self.footer_center + '  ' + page_no if self.footer_center else page_no)
+        painter.drawText(QRectF(third, y, third, self.footer_h),
+                         Qt.AlignHCenter | Qt.AlignVCenter, center_text)
+        painter.drawText(QRectF(third * 2, y, third - 6, self.footer_h),
+                         Qt.AlignRight | Qt.AlignVCenter, self.footer_right)
         painter.restore()
 
     @staticmethod
@@ -155,6 +185,10 @@ class PageCanvas(QWidget):
         super().__init__(parent)
         self.head_html = ''
         self.body_html = ''
+        self.footer_left = ''
+        self.footer_center = ''
+        self.footer_right = ''
+        self.show_page_no = True
         self.margins = {'top': 1.9, 'bottom': 1.9, 'left': 1.9, 'right': 1.9}
         self.landscape = False
         self.paper = DEFAULT_PAPER      # (宽mm, 高mm)
@@ -189,9 +223,14 @@ class PageCanvas(QWidget):
 
     # ---------- 数据 ----------
     def set_content(self, head_html, body_html, margins=None, landscape=False,
-                    zoom=None, paper=None):
+                    zoom=None, paper=None, footer_left='', footer_center='',
+                    footer_right='', show_page_no=True):
         self.head_html = head_html or ''
         self.body_html = body_html or ''
+        self.footer_left = footer_left or ''
+        self.footer_center = footer_center or ''
+        self.footer_right = footer_right or ''
+        self.show_page_no = bool(show_page_no)
         if margins:
             self.margins = {k: float(margins.get(k, 1.9)) for k in ('top', 'bottom', 'left', 'right')}
         self.landscape = bool(landscape)
@@ -215,7 +254,9 @@ class PageCanvas(QWidget):
         w_cm, h_cm = self.paper_cm()
         cw = max(40.0, (w_cm - self.margins['left'] - self.margins['right']) * px_per_cm())
         ch = max(40.0, (h_cm - self.margins['top'] - self.margins['bottom']) * px_per_cm())
-        self._renderer = ReportRenderer(self.head_html, self.body_html, cw, ch)
+        self._renderer = ReportRenderer(
+            self.head_html, self.body_html, cw, ch,
+            self.footer_left, self.footer_center, self.footer_right, self.show_page_no)
         self._content = (cw * self.zoom, ch * self.zoom)      # 设备像素
         self._page_count = self._renderer.page_count
         total_h = self._page_count * h + (self._page_count - 1) * self.GAP + 2 * self.PAD
@@ -255,13 +296,7 @@ class PageCanvas(QWidget):
             p.setPen(QPen(QColor('#c2c8d0'), 1))
             p.setBrush(Qt.NoBrush)
             p.drawRect(page)
-            # 页码（画在下页边距里）
-            p.setPen(QColor('#9aa1aa'))
-            f = p.font()
-            f.setPointSize(8)
-            p.setFont(f)
-            p.drawText(QRectF(self.PAD, top + h - mb, w, mb),
-                       Qt.AlignHCenter | Qt.AlignTop, '第 %d 页 / 共 %d 页' % (i + 1, self._page_count))
+            # 页脚与页码已由 ReportRenderer 画在正文区底部，这里不再重复绘制
 
             # 页边距区域淡蓝底 + 虚线（仅首页显示手柄）
             p.fillRect(QRectF(self.PAD, top, w, mt), QColor(70, 130, 200, 16))
@@ -501,9 +536,12 @@ class PrintPreviewPane(QWidget):
         self.lbl_paper.setText('纸张：%s  %0.0f×%0.0fmm（%s）'
                                % (name, w_mm, h_mm,
                                   '横向' if rep.get('orientation') == 'landscape' else '纵向'))
+        fl, fc, fr = self.win.footer_fields()
         self.canvas.set_content(self.win.report_head_html(), self.win.report_body_html(),
                                 vals, rep.get('orientation') == 'landscape',
-                                paper=(w_mm, h_mm))
+                                paper=(w_mm, h_mm),
+                                footer_left=fl, footer_center=fc, footer_right=fr,
+                                show_page_no=True)
         self._apply_zoom()
         # 首次显示时 viewport 尺寸还没定，等布局完成再按宽度适配一次
         QTimer.singleShot(0, self._apply_zoom)

@@ -16,7 +16,7 @@ from PyQt5.QtWidgets import (
     QScrollArea, QGroupBox
 )
 from PyQt5.QtCore import (Qt, QSettings, QMimeData, QEvent, QTimer, QUrl, QRectF, QPointF,
-                          QPoint, QSizeF, QRect, pyqtSignal, QObject)
+                          QPoint, QSizeF, QRect, pyqtSignal, QObject, QItemSelectionModel)
 from PyQt5.QtGui import (QFont, QFontMetrics, QColor, QKeySequence, QIcon, QTextCursor,
                          QDesktopServices, QPixmap, QPainter, QPen, QBrush, QPalette,
                          QCursor)
@@ -32,7 +32,7 @@ from ui_printpreview import PrintPreviewPane
 from core.highlighter import FormulaHighlighter, compute_runs, FCOLOR
 
 APP_NAME = "工程量计算书"
-APP_VER = "2.7.3"
+APP_VER = "2.8.0"
 FILE_EXT = '.gcls'          # 工程文件后缀（内容仍是 JSON，便于排查与迁移）
 
 # ---- 工程文件关联（让资源管理器把 .gcls 显示成软件图标）----
@@ -1099,6 +1099,8 @@ class SummaryPanel(QFrame):
         self._groups = []
         self._total = (0.0, 0)
         self._units = set()
+        # 汇总表列宽按表头文字记住，刷新 / 重开后仍保持用户拖出来的宽度
+        self._col_widths = dict(win.settings.value('summary_col_widths', {}, type=dict) or {})
 
         v = QVBoxLayout(self)
         v.setContentsMargins(5, 4, 5, 4)
@@ -1125,6 +1127,16 @@ class SummaryPanel(QFrame):
                                     'QToolButton:hover { background:#e8f0fa; border-color:#9dbce0; }')
         self.btn_fold.clicked.connect(lambda: self.win.fold_summary(True))
         head.addWidget(self.btn_fold)
+        # 放大汇总：隐藏主工作区，让汇总表占满窗口；再点还原
+        self.btn_max = QToolButton(self)
+        self.btn_max.setText('⤢')
+        self.btn_max.setToolTip('放大分类汇总（隐藏主工作区）')
+        self.btn_max.setCursor(Qt.PointingHandCursor)
+        self.btn_max.setAutoRaise(True)
+        self.btn_max.setFixedSize(20, 20)
+        self.btn_max.setStyleSheet(self.btn_fold.styleSheet())
+        self.btn_max.clicked.connect(lambda: self.win.toggle_summary_max())
+        head.addWidget(self.btn_max)
         v.addLayout(head)
 
         mode_row = QHBoxLayout()
@@ -1166,10 +1178,12 @@ class SummaryPanel(QFrame):
         self.table.setWordWrap(False)
         self.table.setStyleSheet('QTableWidget::item { padding:2px 3px; }')
         hh = self.table.horizontalHeader()
-        hh.setSectionResizeMode(0, QHeaderView.Stretch)
-        for i, w in ((1, 42), (2, 84), (3, 40)):
+        # 所有列都允许拖动宽度（原来第 0 列是 Stretch，项目名称列拖不动）
+        for i, w in ((0, 160), (1, 42), (2, 84), (3, 40)):
             hh.setSectionResizeMode(i, QHeaderView.Interactive)
-            self.table.setColumnWidth(i, w)
+            title = self.table.horizontalHeaderItem(i).text()
+            self.table.setColumnWidth(i, int(self._col_widths.get(title, w)))
+        hh.sectionResized.connect(self._on_col_resized)
         self.table.verticalHeader().setDefaultSectionSize(24)
         self._setup_table_ops()
         v.addWidget(self.table, 1)
@@ -1232,6 +1246,17 @@ class SummaryPanel(QFrame):
         QApplication.clipboard().setText('\n'.join(lines))
         self.win.status.showMessage('已复制汇总表 %d 行 × %d 列' % (len(rows), len(cols)), 2500)
 
+    def _on_col_resized(self, col, old, new):
+        """用户拖动列分隔线后记住宽度，按表头文字存，刷新后仍生效。"""
+        hi = self.table.horizontalHeaderItem(col)
+        if hi is None or new <= 0:
+            return
+        self._col_widths[hi.text()] = int(new)
+        try:
+            self.win.settings.setValue('summary_col_widths', self._col_widths)
+        except Exception:
+            pass
+
     def fit_columns(self, cols=None):
         """按内容自动列宽（与工作区“列宽自适应”同样的口径）。"""
         hh = self.table.horizontalHeader()
@@ -1260,6 +1285,24 @@ class SummaryPanel(QFrame):
         for r in range(self.table.rowCount()):
             self.table.setRowHeight(r, max(22, min(80, self.table.rowHeight(r))))
 
+    def set_col_width_dialog(self, col):
+        """输入像素值设置汇总表某一列列宽。"""
+        hi = self.table.horizontalHeaderItem(col)
+        title = hi.text() if hi is not None else '本列'
+        val, ok = QInputDialog.getInt(self, '设置列宽',
+                                      '「%s」列宽（像素，30–600）：' % title,
+                                      self.table.columnWidth(col), 30, 600, 1)
+        if ok:
+            self.table.setColumnWidth(col, val)
+
+    def set_row_height_dialog(self, row):
+        """输入像素值设置汇总表某一行行高。"""
+        val, ok = QInputDialog.getInt(self, '设置行高',
+                                      '行高（像素，18–120）：',
+                                      self.table.rowHeight(row), 18, 120, 1)
+        if ok:
+            self.table.setRowHeight(row, val)
+
     def reset_rows(self):
         for r in range(self.table.rowCount()):
             self.table.setRowHeight(r, 24)
@@ -1271,6 +1314,7 @@ class SummaryPanel(QFrame):
         if c >= 0:
             hi = self.table.horizontalHeaderItem(c)
             title = hi.text() if hi is not None else ''
+            m.addAction('设置本列列宽…「%s」' % title, lambda cc=c: self.set_col_width_dialog(cc))
             m.addAction('本列列宽自适应「%s」' % title, lambda cc=c: self.fit_columns([cc]))
         m.addAction('全部列宽自适应', lambda: self.fit_columns())
         m.addAction('全部行高自适应', self.fit_rows)
@@ -1300,6 +1344,10 @@ class SummaryPanel(QFrame):
         m.addAction('复制选中单元格  (Ctrl+C)', self.copy_selection)
         m.addAction('复制整张汇总表', self.select_all_copy)
         m.addSeparator()
+        if r >= 0:
+            m.addAction('设置本行行高…', lambda rr=r: self.set_row_height_dialog(rr))
+        if c >= 0:
+            m.addAction('设置本列列宽…', lambda cc=c: self.set_col_width_dialog(cc))
         m.addAction('列宽自适应', lambda: self.fit_columns())
         m.addAction('行高自适应', self.fit_rows)
         m.addAction('恢复默认行高', self.reset_rows)
@@ -1447,8 +1495,14 @@ class SummaryPanel(QFrame):
         self.table.setColumnCount(ncol)
         self.table.setHorizontalHeaderLabels(heads)
         hh = self.table.horizontalHeader()
+        defaults = (160, 42, 84, 40, 90, 90)
         for c in range(ncol):
-            hh.setSectionResizeMode(c, QHeaderView.Stretch if c == 0 else QHeaderView.Interactive)
+            hh.setSectionResizeMode(c, QHeaderView.Interactive)
+            saved = self._col_widths.get(heads[c])
+            if saved:
+                self.table.setColumnWidth(c, int(saved))
+            elif c < len(defaults):
+                self.table.setColumnWidth(c, defaults[c])
         self.table.setRowCount(0)
         for keys, u, val, n in rows:
             r = self.table.rowCount()
@@ -1490,7 +1544,9 @@ class SummaryPanel(QFrame):
         if rows:
             self.fit_rows()
             if was_empty:
-                self.fit_columns()
+                unsaved = [c for c, h in enumerate(heads) if h not in self._col_widths]
+                if unsaved:
+                    self.fit_columns(unsaved)
         self.btn_export.setEnabled(bool(rows))
         self.btn_copy.setEnabled(bool(rows))
         self.win.lbl_status.setText('分类汇总（%s）：%d 项，%d 行'
@@ -2073,11 +2129,21 @@ class ReportSettingsDialog(QDialog):
         self.ed_title.setPlaceholderText('留空则使用"工程名 工程量计算书"')
         self.ed_header = QLineEdit(self.report.get('header', ''))
         self.ed_header.setPlaceholderText('每页顶部文字，如：XX项目 造价咨询有限公司')
-        self.ed_footer = QLineEdit(self.report.get('footer', ''))
-        self.ed_footer.setPlaceholderText('每页底部文字，如：编制人：___  第 &P 页')
+        self.ed_footer_left = QLineEdit(self.report.get('footer_left', ''))
+        self.ed_footer_left.setPlaceholderText('例如：编制人：__________')
+        self.ed_footer_center = QLineEdit(self.report.get('footer_center', ''))
+        self.ed_footer_center.setPlaceholderText('中间文字（页码自动加在后面）')
+        self.ed_footer_right = QLineEdit(self.report.get('footer_right', ''))
+        self.ed_footer_right.setPlaceholderText('例如：复核人：__________')
+        if not (self.ed_footer_left.text() or self.ed_footer_center.text()
+                or self.ed_footer_right.text()):
+            # 兼容旧版单一页脚字段
+            self.ed_footer_center.setText(self.report.get('footer', ''))
         form.addRow('表头标题：', self.ed_title)
         form.addRow('页眉：', self.ed_header)
-        form.addRow('页脚：', self.ed_footer)
+        form.addRow('页脚左：', self.ed_footer_left)
+        form.addRow('页脚中：', self.ed_footer_center)
+        form.addRow('页脚右：', self.ed_footer_right)
 
         # —— 页边距：上下左右分别设置 ——
         margins = self.report.get('margins') or {}
@@ -2191,7 +2257,9 @@ class ReportSettingsDialog(QDialog):
         self.report.update({
             'title': self.ed_title.text().strip(),
             'header': self.ed_header.text().strip(),
-            'footer': self.ed_footer.text().strip(),
+            'footer_left': self.ed_footer_left.text().strip(),
+            'footer_center': self.ed_footer_center.text().strip(),
+            'footer_right': self.ed_footer_right.text().strip(),
             'margins': {
                 'top': min(self.sp_top.value(), max_tb),
                 'bottom': min(self.sp_bottom.value(), max_tb),
@@ -2354,6 +2422,7 @@ class MainWindow(QMainWindow):
         self.recent = self.settings.value('recent', [], type=list) or []
         self._loading = False
         self._formula_row = None   # 辅助框当前关联的行索引
+        self._print_area = None    # 选定打印区域：{'section', 'rows', 'keys'}
         self._syncing = False      # 双向同步防循环标志
         self._cell_editor = None   # 当前正在编辑的表格单元格编辑器
         # 自动保存设置
@@ -2827,6 +2896,8 @@ class MainWindow(QMainWindow):
                 ('打印', [
                     ('打印', 'print', self.print_report, 'Ctrl+P', True),
                     ('打印预览', 'print', self.print_preview, '', True),
+                    ('设置打印区域', 'print', self.set_print_area, '', True),
+                    ('清除打印区域', 'print', self.clear_print_area, '', False),
                     ('页面设置', 'settings', self.page_setup, '', True),
                 ]),
             ],
@@ -2912,6 +2983,7 @@ class MainWindow(QMainWindow):
         qb.addSpacing(4)
         quick_actions = [
             ('分类汇总', self.data_summary),
+            ('打印选中区域', self.set_print_area),
             ('插入函数', self.show_function_picker),
             ('树形显示', self.toggle_tree_expand),
             ('选中列高亮', self.toggle_col_highlight, self._hilite_col),
@@ -3158,6 +3230,7 @@ class MainWindow(QMainWindow):
         # 记住用户拖出来的宽度，收起 / 展开时复原
         self._nav_folded = False
         self._sum_folded = False
+        self._sum_max = False
         self._const_folded = False
         self._left_width = int(self.settings.value('main_left_w', 300) or 300)
         self._sum_width = int(self.settings.value('main_sum_w', 300) or 300)
@@ -3337,9 +3410,45 @@ class MainWindow(QMainWindow):
         """收起 / 展开右侧分类汇总面板。"""
         if hide is None:
             hide = not self._sum_folded
+        if hide and getattr(self, '_sum_max', False):
+            self.toggle_summary_max(False)
         if hide and not self._sum_folded and self.summary_panel.width() > 60:
             self._sum_width = self.summary_panel.width()
         self._fold('sum', hide)
+
+    def toggle_summary_max(self, on=None):
+        """放大 / 还原分类汇总：放大时隐藏左侧导航与工作区，汇总表占满窗口。"""
+        if on is None:
+            on = not getattr(self, '_sum_max', False)
+        on = bool(on)
+        if on == getattr(self, '_sum_max', False):
+            return
+        self._sum_max = on
+        if on:
+            if self._sum_folded:               # 放大前先确保汇总面板可见
+                self._sum_folded = False
+                self.summary_panel.setVisible(True)
+                self.btn_sum_open.setVisible(False)
+            if self.summary_panel.width() > 60:
+                self._sum_width = self.summary_panel.width()
+            self.left_frame.setVisible(False)
+            self.work_pane.setVisible(False)
+            self.btn_nav_open.setVisible(False)
+            self.btn_sum_open.setVisible(False)
+            self.summary_panel.btn_max.setText('⤡')
+            self.summary_panel.btn_max.setToolTip('还原工作区')
+            self._sync_main_sizes()
+            self.summary_panel.refresh()
+            self.status.showMessage('分类汇总已放大：主工作区暂时隐藏', 3000)
+        else:
+            self.left_frame.setVisible(not self._nav_folded)
+            self.work_pane.setVisible(True)
+            self.btn_nav_open.setVisible(self._nav_folded)
+            self.btn_sum_open.setVisible(False)
+            self.summary_panel.btn_max.setText('⤢')
+            self.summary_panel.btn_max.setToolTip('放大分类汇总（隐藏主工作区）')
+            self._sync_main_sizes()
+            self.status.showMessage('已还原工作区', 2000)
 
     def fold_const(self, hide=None):
         """收起 / 展开左下常量框。"""
@@ -3353,6 +3462,13 @@ class MainWindow(QMainWindow):
         """左导航 / 工作区 / 汇总三块按记录宽度分配（窗口太窄时按比例让位）。"""
         total = self.main_split.width()
         if total < 480:
+            return
+        if getattr(self, '_sum_max', False):
+            self._applying_sizes = True
+            try:
+                self.main_split.setSizes([0, 0, total])
+            finally:
+                self._applying_sizes = False
             return
         HANDLE = 1 * 2          # 两个 1px 细线分隔
         lw = self._left_width if not self._nav_folded else 0
@@ -4466,18 +4582,12 @@ class MainWindow(QMainWindow):
             self._dirty = True
 
     def delete_cells_data(self, *args):
-        """删除选中单元格的数据（保留行列结构），支持框选多个单元格。
+        """清除选中单元格的数据（保留行列结构），支持单选 / 框选多个单元格。
 
-        整行 / 整列选中时改由 delete_rows / delete_column 处理结构删除。
+        这里只清内容，不因为整行 / 整列选中而删除行列；结构删除请用专门的“删除行”菜单。
         """
         sel = self.table.selectionModel()
         indexes = sel.selectedIndexes() if sel is not None else []
-        # 整行选中 → 删行；整列选中 → 删列；否则按单元格清数据
-        sel_rows = sel.selectedRows() if sel is not None else []
-        sel_cols = sel.selectedColumns() if sel is not None else []
-        if sel_rows and not sel_cols and len(indexes) >= self.table.columnCount():
-            self.delete_rows()
-            return
         if not indexes:
             r, c = self.table.currentRow(), self.table.currentColumn()
             if r < 0 or c < 0:
@@ -4518,17 +4628,7 @@ class MainWindow(QMainWindow):
             self._dirty = True
 
     def delete_selection(self, *args):
-        """Delete 快捷键：整行→删行、整列→删列、其余→删选中单元格数据。"""
-        sel = self.table.selectionModel()
-        sel_cols = sel.selectedColumns() if sel is not None else []
-        sel_rows = sel.selectedRows() if sel is not None else []
-        if sel_cols and not sel_rows:
-            cols = sorted({i.column() for i in sel_cols})
-            self.delete_column(cols[0])
-            return
-        if sel_rows and not sel_cols:
-            self.delete_rows()
-            return
+        """Delete 快捷键 / 右键菜单：只清除选中单元格内容，不删除行列。"""
         self.delete_cells_data()
 
     def table_menu(self, pos):
@@ -4539,14 +4639,15 @@ class MainWindow(QMainWindow):
         hit = self.table.indexAt(pos)
         in_selection = hit.isValid() and hit in self.table.selectionModel().selectedIndexes()
         if not in_selection:
-            if row >= 0:
-                self.table.setCurrentCell(row, max(col, 0))
-                self.table.selectRow(row)
+            if row >= 0 and col >= 0:
+                hit_idx = self.table.model().index(row, col)
+                self.table.selectionModel().select(hit_idx, QItemSelectionModel.ClearAndSelect)
+                self.table.setCurrentIndex(hit_idx)
         menu = QMenu(self)
         menu.addAction('在上方插入行', self.insert_row_above)
         menu.addAction('在下方插入行', self.insert_row_below)
         menu.addSeparator()
-        menu.addAction('删除单元格数据  (Delete)', self.delete_cells_data)
+        menu.addAction('清除单元格内容  (Delete)', self.delete_cells_data)
         menu.addAction('删除选中行', self.delete_rows)
         menu.addAction('粘贴 WPS 数据  (Ctrl+V)', self.paste_from_clipboard)
         menu.addSeparator()
@@ -5580,15 +5681,26 @@ class MainWindow(QMainWindow):
         ha = rep.get('halign', 'left')
         return va, ha
 
+    def _active_columns(self):
+        """当前打印区域涉及的列；未设置打印区域时返回全部列。"""
+        area = getattr(self, '_print_area', None)
+        if area and area.get('keys'):
+            keys = set(area['keys'])
+            return [c for c in self.project.columns if c.get('key') in keys]
+        return self.project.columns
+
     def _report_col_pct(self):
         """各列宽度百分比：优先取界面上当前的真实列宽（含手动拖动后的宽度）。"""
         table = getattr(self, 'table', None)
+        cols = self._active_columns()
+        key_index = {c.get('key'): i for i, c in enumerate(self.project.columns)}
         cw = []
-        for i, c in enumerate(self.project.columns):
+        for i, c in enumerate(cols):
             w = 0.0
-            if table is not None and i < table.columnCount():
+            src = key_index.get(c.get('key'), i)
+            if table is not None and src < table.columnCount():
                 try:
-                    w = float(table.columnWidth(i))
+                    w = float(table.columnWidth(src))
                 except Exception:
                     w = 0.0
             if w <= 0:
@@ -5605,7 +5717,7 @@ class MainWindow(QMainWindow):
         MINPCT = {'code': 12.0, 'unit': 6.5, 'value': 9.5, 'no_count': 6.0, 'remark': 10.0}
         for _ in range(2):
             pct = [max(pct[i], MINPCT.get(c['key'], 0.0))
-                   for i, c in enumerate(self.project.columns)]
+                   for i, c in enumerate(cols)]
             _sum = sum(pct) or 1.0
             pct = [x / _sum * 100.0 for x in pct]
         return pct
@@ -5631,10 +5743,21 @@ class MainWindow(QMainWindow):
                 '<colgroup>' + ''.join('<col width="%.1f%%">' % x for x in pct)
                 + '</colgroup>')
 
+    def footer_fields(self):
+        """页脚左 / 中 / 右文本；旧版单一 footer 字段作为中间文字兼容。"""
+        rep = self.project.report or {}
+        left = str(rep.get('footer_left', '') or '')
+        center = str(rep.get('footer_center', '') or '')
+        right = str(rep.get('footer_right', '') or '')
+        if not (left or center or right):
+            center = str(rep.get('footer', '') or '')
+        return left, center, right
+
     def report_head_html(self):
         """报表「头部」：报表页眉 + 标题 + 表头行 —— 每一页都会重复打印。"""
         rep = self.project.report or {}
-        headers = [c['title'] for c in self.project.columns]
+        cols = self._active_columns()
+        headers = [c['title'] for c in cols]
         pct = self._report_col_pct()
         parts = []
         if rep.get('header'):
@@ -5651,17 +5774,20 @@ class MainWindow(QMainWindow):
 
     def report_body_html(self):
         """报表「正文」：数据表格（不含表头行）+ 页脚。"""
-        rep = self.project.report or {}
         va, ha = self._report_style()
-        ncol = len(self.project.columns)
+        area = getattr(self, '_print_area', None)
+        cols = self._active_columns()
+        ncol = len(cols)
         pct = self._report_col_pct()
         parts = [self._report_table_open(pct)]
 
         def walk(sec, level=0):
             parts.append(f'<tr><td colspan="{ncol}" style="background:#fff2cc"><b>{"　"*level}{sec.name}</b></td></tr>')
-            for r in sec.rows:
+            for ri, r in enumerate(sec.rows):
+                if area and (sec is not area.get('section') or ri not in area.get('rows', ())):
+                    continue
                 tds = []
-                for k, cd in enumerate(self.project.columns):
+                for k, cd in enumerate(cols):
                     key = cd['key']
                     if key == 'no_count':
                         text = '是' if r.no_count else ''
@@ -5680,11 +5806,17 @@ class MainWindow(QMainWindow):
                     tds.append('<td width="%.1f%%" style="%s">%s</td>'
                                % (pct[k] if k < len(pct) else 0, style, text))
                 parts.append('<tr>' + ''.join(tds) + '</tr>')
-            t = sec.total()
+            if area and sec is area.get('section'):
+                vals = [r.value for ri, r in enumerate(sec.rows)
+                        if ri in area.get('rows', ()) and not getattr(r, 'no_count', False)
+                        and r.value is not None]
+                t = sum(float(v) for v in vals) if vals else None
+            else:
+                t = sec.total() if not area else None
             if t is not None:
                 # 小计值放在"工程量"列，其余列留空
                 vidx = ncol - 1
-                for _i, _c in enumerate(self.project.columns):
+                for _i, _c in enumerate(cols):
                     if _c['key'] == 'value':
                         vidx = _i
                         break
@@ -5699,8 +5831,7 @@ class MainWindow(QMainWindow):
         for book in (self.project.books or [self.project.root]):
             walk(book, 0)
         parts.append('</table>')
-        if rep.get('footer'):
-            parts.append(f'<div style="text-align:center;font-size:10pt;color:#888;border-top:1px solid #ccc;padding:4px">{rep["footer"]}</div>')
+        # 页脚统一由 ReportRenderer 在每页底部绘制（左/中/右 + 自动页码），这里不再插入
         return ''.join(parts)
 
     def report_html(self, with_margins=True):
@@ -5717,6 +5848,43 @@ class MainWindow(QMainWindow):
         if with_margins:
             return f'<div style="padding:{mt}cm {mr}cm {mb}cm {ml}cm;">{inner}</div>'
         return inner
+
+    def selected_print_area(self):
+        """把表格当前选中区域转成打印区域（行索引 + 列 key + 所属分部）。"""
+        sel = self.table.selectionModel()
+        indexes = sel.selectedIndexes() if sel is not None else []
+        if not indexes:
+            r, c = self.table.currentRow(), self.table.currentColumn()
+            if r < 0 or c < 0:
+                return None
+            indexes = [self.table.model().index(r, c)]
+        rows = sorted({i.row() for i in indexes if i.row() >= 0})
+        keys = []
+        for c in sorted({i.column() for i in indexes if i.column() >= 0}):
+            key = self.col_key(c)
+            if key and key not in keys:
+                keys.append(key)
+        if not rows or not keys:
+            return None
+        return {'section': self.current_section, 'rows': set(rows), 'keys': keys}
+
+    def set_print_area(self):
+        """把当前选中单元格设为打印区域，并打开预览确认。"""
+        area = self.selected_print_area()
+        if area is None:
+            QMessageBox.information(self, APP_NAME, '请先在表格里选中要打印的行 / 列区域。')
+            return
+        self._print_area = area
+        self.print_preview()
+        self.status.showMessage('已设置打印区域：%d 行 × %d 列（点“清除打印区域”可恢复全部）'
+                                % (len(area['rows']), len(area['keys'])), 5000)
+
+    def clear_print_area(self):
+        """清除打印区域，恢复打印整张计算书。"""
+        self._print_area = None
+        if hasattr(self, 'preview_pane'):
+            self.preview_pane.refresh()
+        self.status.showMessage('已清除打印区域，将打印整张计算书', 3000)
 
     def print_preview(self):
         """切到报表页并刷新纸张预览（页边距可直接拖动调整）。"""
@@ -5786,7 +5954,9 @@ class MainWindow(QMainWindow):
         rect = printer.pageRect()
         cw = rect.width() / scale
         ch = rect.height() / scale
-        renderer = ReportRenderer(self.report_head_html(), self.report_body_html(), cw, ch)
+        fl, fc, fr = self.footer_fields()
+        renderer = ReportRenderer(self.report_head_html(), self.report_body_html(), cw, ch,
+                                  fl, fc, fr, show_page_no=True)
         painter = QPainter(printer)
         try:
             painter.scale(scale, scale)
