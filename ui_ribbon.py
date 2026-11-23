@@ -578,10 +578,21 @@ class RibbonWidget(QWidget):
             lay.addWidget(page)
             self.pages[tab_name] = page
         self.current_page = names[0] if names else None
+        self._expanded = True
         self.updateGeometry()
 
+    def set_expanded(self, on=True):
+        """展开 / 收起按钮区（收起后只留页签行，对应“默认展开Ribbon菜单”选项）。"""
+        self._expanded = bool(on)
+        for name, page in self.pages.items():
+            page.setVisible(self._expanded and name == self.current_page)
+        self.updateGeometry()
+
+    def is_expanded(self):
+        return self._expanded
+
     def show_page(self, name):
-        for n, p in self.pages.items():
-            p.setVisible(n == name)
         self.current_page = name
+        for n, p in self.pages.items():
+            p.setVisible(self._expanded and n == name)
         self.updateGeometry()

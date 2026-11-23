@@ -96,3 +96,18 @@ def fmt_const(v):
     if abs(f - round(f)) < 1e-9:
         return str(int(round(f)))
     return ('%.6f' % f).rstrip('0').rstrip('.')
+
+
+def fmt_num(v, prec=3):
+    """按位数格式化工程量：四舍五入（half-up）、带千分位；None 显示空。"""
+    if v is None:
+        return ''
+    try:
+        from decimal import Decimal, ROUND_HALF_UP
+        q = Decimal(1).scaleb(-int(prec))
+        d = Decimal(str(float(v))).quantize(q, rounding=ROUND_HALF_UP)
+        if d == 0:
+            d = abs(d)          # 避免 -0.00
+    except Exception:
+        return str(v)
+    return format(d, ',.%df' % int(prec))

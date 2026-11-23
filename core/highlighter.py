@@ -28,12 +28,13 @@ FCOLOR = {
 }
 
 _NUM_RE = re.compile(r'\d+(?:\.\d+)?')
-_OP_RE = re.compile(r'[+\-*/^()=×÷,，]+')
-_BRACKET_RE = re.compile(r'[\[{【][^\]}]*[\]}】]')
+# V3.7.0：全角括号（“加宽括号”选项的显示效果）也按运算符 / 方括号着色
+_OP_RE = re.compile(r'[+\-*/^()=×÷,，（）]+')
+_BRACKET_RE = re.compile(r'[\[{【［][^\]}]*[\]}】］]')
 _CJK_RE = re.compile(r'[\u4e00-\u9fff]+')
 _SUPER_RE = re.compile(r'[²³¹⁰]')
 # @常量（含 @Φ8 这种带希腊字母的），遇到运算符/括号即结束
-_CONST_RE = re.compile(r'@[^\s+\-*/^()=×÷,，\[\]{}【】]+')
+_CONST_RE = re.compile(r'@[^\s+\-*/^()=×÷,，\[\]{}【】（）［］]+')
 
 
 def compute_runs(text):
