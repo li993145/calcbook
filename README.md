@@ -1,13 +1,19 @@
 # 工程量计算书 CalcBook
 
 > 基于 **Python + PyQt5** 的建筑工程量计算书工具 —— 分层目录、公式自动计算、单位精度控制、打印导出。
-> 当前版本：**V2.10.0**
+> 当前版本：**V3.0.0**
 
 ![主界面](docs/screenshot-main.png)
 
 ---
 
-## 本次修订（V2.10.0）
+## 本次修订（V3.0.0）
+
+- **全新图标**：程序图标更换为异瞳猫（exe / 窗口 / 任务栏）；工程文件（`.gcls`）图标更换为独立文件样式图标——文件夹里的工程文件一眼可辨，换目录后启动会自动重新关联。
+- **修复 V2.10.0 点「排序」报错的问题**：排序 / 筛选对话框现在能正常弹出。
+- **复制更顺手（WPS 同款）**：**单击选中即可 Ctrl+C 复制**，不再"要点进编辑状态才能复制"；双击 / F2 才进入单元格编辑。框选区域 Ctrl+C 复制为 TSV，可直接粘进 WPS / Excel。
+
+### V2.10.0
 
 - **复制粘贴完善**：Ctrl+C / 右键复制改为**按选中区域**复制（原来是整行复制），Ctrl+X 剪切行，Ctrl+V 粘贴自动扩展行。
 - **拖动填充柄（自动序号）**：选中单元格后右下角有蓝色小方块，按住向下 / 向右拖动即 WPS 式填充——纯数字自动等差递增（选两格可推断步长，如 1、3 → 5、7）、尾号数字自动进位（`A-001` → `A-002`、`TG102.103` → `TG102.104`，保留前导零）、汉字 / 公式循环复制；向上 / 向左拖动递减。可撤销。
@@ -118,14 +124,14 @@
 
 ### 方式一：直接下载可执行文件（推荐给非技术用户）
 
-下载 `CalcBook-v2.10.0.exe`（约 58MB），双击运行，免安装：
+下载 `CalcBook-v3.0.0.exe`（约 58MB），双击运行，免安装：
 
-- [Gitee Release（推荐国内用户，点附件下载）](https://gitee.com/li993145/calcbook/releases/tag/v2.10.0)
-- [GitHub Release](https://github.com/li993145/calcbook/releases/tag/v2.10.0)
+- [Gitee Release（推荐国内用户，点附件下载）](https://gitee.com/li993145/calcbook/releases/tag/v3.0.0)
+- [GitHub Release](https://github.com/li993145/calcbook/releases/tag/v3.0.0)
 
-> 本版本更新明细见 [RELEASE_NOTES_v2.10.0.md](RELEASE_NOTES_v2.10.0.md)。
+> 本版本更新明细见 [RELEASE_NOTES_v3.0.0.md](RELEASE_NOTES_v3.0.0.md)。
 >
-> 历史版本：[V2.9.2](https://gitee.com/li993145/calcbook/releases/tag/v2.9.2)（[更新明细](RELEASE_NOTES_v2.9.2.md)）、[V2.9.1](https://gitee.com/li993145/calcbook/releases/tag/v2.9.1)（[更新明细](RELEASE_NOTES_v2.9.1.md)）、[V2.9.0](https://gitee.com/li993145/calcbook/releases/tag/v2.9.0)（[更新明细](RELEASE_NOTES_v2.9.0.md)）、[V2.8.3](https://gitee.com/li993145/calcbook/releases/tag/v2.8.3)（[更新明细](RELEASE_NOTES_v2.8.3.md)）、[V2.8.2](https://gitee.com/li993145/calcbook/releases/tag/v2.8.2)（[更新明细](RELEASE_NOTES_v2.8.2.md)）、[V2.8.1](https://gitee.com/li993145/calcbook/releases/tag/v2.8.1)（[更新明细](RELEASE_NOTES_v2.8.1.md)）、[V2.8.0](https://gitee.com/li993145/calcbook/releases/tag/v2.8.0)（[更新明细](RELEASE_NOTES_v2.8.0.md)）、[V2.7.3](https://gitee.com/li993145/calcbook/releases/tag/v2.7.3)（[更新明细](RELEASE_NOTES_v2.7.3.md)）、[V2.7.2](https://github.com/li993145/calcbook/releases/tag/v2.7.2)（[更新明细](RELEASE_NOTES_v2.7.2.md)）、[V2.7.1](https://github.com/li993145/calcbook/releases/tag/v2.7.1)（[更新明细](RELEASE_NOTES_v2.7.1.md)）、[V2.7.0](https://github.com/li993145/calcbook/releases/tag/v2.7.0)（[更新明细](RELEASE_NOTES_v2.7.0.md)）、[V2.6.0](https://github.com/li993145/calcbook/releases/tag/v2.6.0)（[更新明细](RELEASE_NOTES_v2.6.0.md)）、[V2.5.0](https://github.com/li993145/calcbook/releases/tag/v2.5.0)（[更新明细](RELEASE_NOTES_v2.5.0.md)）。
+> 历史版本：[V2.10.0](https://gitee.com/li993145/calcbook/releases/tag/v2.10.0)（[更新明细](RELEASE_NOTES_v2.10.0.md)）、[V2.9.2](https://gitee.com/li993145/calcbook/releases/tag/v2.9.2)（[更新明细](RELEASE_NOTES_v2.9.2.md)）、[V2.9.1](https://gitee.com/li993145/calcbook/releases/tag/v2.9.1)（[更新明细](RELEASE_NOTES_v2.9.1.md)）、[V2.9.0](https://gitee.com/li993145/calcbook/releases/tag/v2.9.0)（[更新明细](RELEASE_NOTES_v2.9.0.md)）、[V2.8.3](https://gitee.com/li993145/calcbook/releases/tag/v2.8.3)（[更新明细](RELEASE_NOTES_v2.8.3.md)）、[V2.8.2](https://gitee.com/li993145/calcbook/releases/tag/v2.8.2)（[更新明细](RELEASE_NOTES_v2.8.2.md)）、[V2.8.1](https://gitee.com/li993145/calcbook/releases/tag/v2.8.1)（[更新明细](RELEASE_NOTES_v2.8.1.md)）、[V2.8.0](https://gitee.com/li993145/calcbook/releases/tag/v2.8.0)（[更新明细](RELEASE_NOTES_v2.8.0.md)）、[V2.7.3](https://gitee.com/li993145/calcbook/releases/tag/v2.7.3)（[更新明细](RELEASE_NOTES_v2.7.3.md)）、[V2.7.2](https://github.com/li993145/calcbook/releases/tag/v2.7.2)（[更新明细](RELEASE_NOTES_v2.7.2.md)）、[V2.7.1](https://github.com/li993145/calcbook/releases/tag/v2.7.1)（[更新明细](RELEASE_NOTES_v2.7.1.md)）、[V2.7.0](https://github.com/li993145/calcbook/releases/tag/v2.7.0)（[更新明细](RELEASE_NOTES_v2.7.0.md)）、[V2.6.0](https://github.com/li993145/calcbook/releases/tag/v2.6.0)（[更新明细](RELEASE_NOTES_v2.6.0.md)）、[V2.5.0](https://github.com/li993145/calcbook/releases/tag/v2.5.0)（[更新明细](RELEASE_NOTES_v2.5.0.md)）。
 
 ### 方式二：从源码运行
 

@@ -7,6 +7,10 @@
 
 import re
 
+from PyQt5.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel,
+                             QComboBox, QLineEdit, QSpinBox, QCheckBox,
+                             QRadioButton, QButtonGroup, QDialogButtonBox)
+
 # ---------------- 拖动填充（自动序号） ----------------
 
 _TRAIL = re.compile(r'^(.*?)(\d+)$')
