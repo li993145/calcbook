@@ -170,6 +170,24 @@ class ReportRenderer:
         painter.restore()
 
 
+def measure_html(html, width):
+    """测量一段 HTML 在给定宽度下排出来的高度（文档像素）。
+
+    用于打印前判断“某个表格行是不是高过整页”：
+    Qt 富文本会把高于一页的表格行从中间切开，导致计算式印不全，
+    所以要先量一量，太高就自动缩小该行字号。
+    """
+    try:
+        doc = QTextDocument()
+        doc.setDefaultFont(QFont('微软雅黑', 10))
+        doc.setDocumentMargin(0)
+        doc.setHtml(html or '')
+        doc.setPageSize(QSizeF(max(40.0, float(width)), 100000.0))
+        return float(ReportRenderer._measure(doc))
+    except Exception:
+        return 0.0
+
+
 class PageCanvas(QWidget):
     """纸张画布：绘制分页内容 + 四条页边距虚线（可拖动）。
 
@@ -216,6 +234,13 @@ class PageCanvas(QWidget):
         w_cm, h_cm = self.paper_cm()
         scale = self.zoom * px_per_cm()
         return w_cm * scale, h_cm * scale, scale
+
+    def content_px(self):
+        """可打印区尺寸（文档像素，与实际打印同一基准，不随显示缩放变化）。"""
+        w_cm, h_cm = self.paper_cm()
+        cw = max(40.0, (w_cm - self.margins['left'] - self.margins['right']) * px_per_cm())
+        ch = max(40.0, (h_cm - self.margins['top'] - self.margins['bottom']) * px_per_cm())
+        return cw, ch
 
     def page_top(self, index=0):
         _w, h, _s = self.page_size_px()
@@ -537,7 +562,14 @@ class PrintPreviewPane(QWidget):
                                % (name, w_mm, h_mm,
                                   '横向' if rep.get('orientation') == 'landscape' else '纵向'))
         fl, fc, fr = self.win.footer_fields()
-        self.canvas.set_content(self.win.report_head_html(), self.win.report_body_html(),
+        # 先把纸张/方向/页边距同步到画布，再按同一基准算可打印区，
+        # 正文按真实页面高度把“高过整页”的行缩字号，保证整行印得全
+        self.canvas.paper = (w_mm, h_mm)
+        self.canvas.landscape = rep.get('orientation') == 'landscape'
+        self.canvas.margins = dict(vals)
+        cw, ch = self.canvas.content_px()
+        body_html = self.win.report_body_html(cw, ch)
+        self.canvas.set_content(self.win.report_head_html(), body_html,
                                 vals, rep.get('orientation') == 'landscape',
                                 paper=(w_mm, h_mm),
                                 footer_left=fl, footer_center=fc, footer_right=fr,
