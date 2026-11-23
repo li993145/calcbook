@@ -36,7 +36,7 @@ from core.highlighter import FormulaHighlighter, compute_runs, FCOLOR
 APP_NAME = "工程量计算书"
 # 本表内部复制/剪切的结构化剪贴板格式（多行整行复制 → 粘到任意位置插入行，不覆盖已有数据）
 CB_ROWS_MIME = 'application/x-calcbook-rows'
-APP_VER = "3.4.1"
+APP_VER = "3.5.0"
 FILE_EXT = '.gcls'          # 工程文件后缀（内容仍是 JSON，便于排查与迁移）
 
 # ---- 工程文件关联（让资源管理器把 .gcls 显示成软件图标）----
@@ -2919,6 +2919,13 @@ class MainWindow(QMainWindow):
                 if top is not None and top is not self:
                     return False
             et = ev.type()
+            # V3.5.0：Ctrl + 鼠标滚轮缩放表格（WPS 式），先于窗口边缘/普通滚动处理
+            if (et == QEvent.Wheel and (ev.modifiers() & Qt.ControlModifier)
+                    and self._is_table_wheel_target(obj)):
+                dy = ev.angleDelta().y() or ev.pixelDelta().y()
+                if dy:
+                    self.zoom_table(1 if dy > 0 else -1)
+                return True
             # 双击单元格进入编辑态后，Ctrl+V 事件被单元格编辑器（QLineEdit）消费，
             # 到不了表格的 keyPressEvent，于是多行数据只塞进当前单元格、行数也不会
             # 自动扩展。这里接管：若焦点在表格编辑器里且剪贴板是多行/多列(TSV)，
@@ -2969,6 +2976,51 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         return super(MainWindow, self).eventFilter(obj, ev)
+
+    def _is_table_wheel_target(self, obj):
+        """滚轮事件是否发生在主表/冻结镜像上（含其视口与滚动条）。"""
+        p = obj
+        while p is not None:
+            if p is getattr(self, 'table', None):
+                return True
+            fz = getattr(self, 'frozen', None)
+            if fz is not None and p in (fz.fc, fz.fr, fz.fx):
+                return True
+            p = p.parent()
+        return False
+
+    def zoom_table(self, step):
+        """Ctrl+滚轮缩放单元格显示：字号 ±1pt，手动行高/列宽按同比例缩放。"""
+        table = getattr(self, 'table', None)
+        if table is None:
+            return
+        old_pt = int(table.font().pointSize() or 10)
+        new_pt = max(6, min(24, old_pt + int(step)))
+        if new_pt == old_pt:
+            return
+        ratio = new_pt / float(old_pt)
+        manual_cols = not bool(getattr(self, '_col_autofit', False))
+        manual_rows = not bool(getattr(self, '_row_autofit', False))
+        widths = ({c: table.columnWidth(c) for c in range(table.columnCount())}
+                  if manual_cols else {})
+        heights = ({r: table.rowHeight(r) for r in range(table.rowCount())}
+                   if manual_rows else {})
+        self._font_size = new_pt          # 仅内存生效，不写设置，重启恢复用户字体
+        self._apply_table_font(table.font().family() or '微软雅黑', new_pt, refit=True)
+        if manual_cols:
+            for c, w in widths.items():
+                table.setColumnWidth(c, max(40, int(round(w * ratio))))
+        if manual_rows:
+            for r, h in heights.items():
+                table.setRowHeight(r, max(18, int(round(h * ratio))))
+        fz = getattr(self, 'frozen', None)
+        if fz is not None:
+            try:
+                fz.sync_widths()
+                fz.sync_heights()
+            except Exception:
+                pass
+        self.status.showMessage('表格显示：%d 号字（Ctrl+滚轮调整）' % new_pt, 1800)
 
     def remember_file(self, path):
         """记住当前工程文件，下次启动自动打开。"""
@@ -3518,10 +3570,16 @@ class MainWindow(QMainWindow):
 
         self.status = QStatusBar()
         self.setStatusBar(self.status)
+        # V3.5.0：右下角不再显示分部小计，改为 WPS 式选区统计（求和/平均值/计数）
+        self.lbl_sel_stats = QLabel('')
+        self.lbl_sel_stats.setStyleSheet(
+            'color:#1f5f99; font-weight:600; padding-left:10px; padding-right:6px;')
+        self.status.addPermanentWidget(self.lbl_sel_stats)
         self.lbl_status = QLabel('就绪')
         # 放到状态栏右侧（永久部件）：临时提示在左侧显示，两者不会叠在一起
         self.lbl_status.setStyleSheet('color:#555; padding-right:6px;')
         self.status.addPermanentWidget(self.lbl_status)
+        self.table.selectionModel().selectionChanged.connect(self.update_selection_stats)
 
         # 报表页：工具条 + 可拖动页边距的纸张预览
         page2 = QWidget()
@@ -3913,7 +3971,8 @@ class MainWindow(QMainWindow):
         <li><b>列宽 / 行高</b>：<b>默认自适应</b>——列宽按内容计算并铺满窗口，行高按内容撑高（长公式 / 长备注自动换行），无需手点。手动拖过列宽后自动列宽会关闭，可在左上角角标右键重新勾选「自动列宽 / 自动行高」恢复；把鼠标移到两列（或两行）表头之间的分隔线上<b>双击</b>可只自适应该列 / 该行。</li>
         <li><b>冻结窗格</b>：右键行号「冻结至本行」/ 列头「冻结至本列」，可同时冻结行列；鼠标停在冻结区上滚轮照常滚动整表，冻结区外数据正常显示；冻结区单元格仍可双击编辑；左上角右键「取消全部冻结」。设置随工程保存。</li>
         <li><b>撤销 / 恢复、查找</b>：Ctrl+Z 撤销、Ctrl+Y 恢复，逐字输入公式只算一步；Ctrl+F 打开查找，可按编号 / 项目名称 / 单位 / 部位 / 计算公式 / 备注或「全部字段」搜索，回车逐个定位到对应行。</li>
-        <li><b>排序 / 筛选</b>：右键或工具栏「计算书编辑」可排序、筛选（等于 / 包含 / 数字比较 / 正则 / 按填充颜色等），只隐藏不删数据、刷新后保持；<b>取消筛选</b>有三个入口：筛选窗口内点「清除筛选」、工具栏「清除筛选」、右键「清除筛选」，点后立即恢复显示全部行。</li>
+        <li><b>排序 / 筛选</b>：右键或工具栏「计算书编辑」可排序、筛选——先在窗口里选<b>筛选列</b>（选哪列就筛哪列，V3.5 修复）再选条件（等于 / 包含 / 数字比较 / 正则 / 按填充颜色等），只隐藏不删数据、刷新后保持、编辑数据后立即重算；内容留空或正则写错会明确提示。<b>取消筛选</b>有三个入口：筛选窗口内点「清除筛选」、工具栏「清除筛选」、右键「清除筛选」，点后立即恢复显示全部行。</li>
+        <li><b>选区统计与缩放</b>：单选 / 多选「工程量」列的数据，状态栏右下角实时显示 <code>求和=… 平均值=… 计数=…</code>（WPS 式，取代原来的固定小计）；在表格上按住 <b>Ctrl + 鼠标滚轮</b> 可放大 / 缩小单元格显示（字号与手动行高列宽同比例，6–24 号字），不按 Ctrl 时滚轮照常滚动。</li>
         </ul>
 
         <h3 style="color:#2f5597;">五、公式与函数</h3>
@@ -4144,9 +4203,8 @@ class MainWindow(QMainWindow):
         if getattr(self, 'frozen', None) is not None:
             self.frozen.set_freeze(int(getattr(self.project, 'freeze_rows', 0) or 0),
                                    int(getattr(self.project, 'freeze_cols', 0) or 0))
-        self.lbl_status.setText('%s：%d 行，小计 %s'
-                                % (sec.name, len(sec.rows),
-                                   fmt_num(sec.total(), section_precision(sec, self.precision))))
+        self.lbl_status.setText('%s：%d 行' % (sec.name, len(sec.rows)))
+        self.update_selection_stats()
         self.schedule_summary_refresh()
 
     def col_key(self, col):
@@ -4382,9 +4440,8 @@ class MainWindow(QMainWindow):
                         self._loading = False
                     break
         sec = self.current_section
-        self.lbl_status.setText('%s：%d 行，小计 %s'
-                                % (sec.name, len(sec.rows),
-                                   fmt_num(sec.total(), section_precision(sec, self.precision))))
+        self.lbl_status.setText('%s：%d 行' % (sec.name, len(sec.rows)))
+        self.update_selection_stats()
         self.schedule_summary_refresh()
 
     def apply_formula_help(self):
@@ -6006,7 +6063,12 @@ class MainWindow(QMainWindow):
         self.status.showMessage('已设置 %d 个单元格对齐方式：%s' % (n, name), 4000)
 
     def _after_cell_editor_closed(self):
-        """单元格编辑结束（V3.2）：恢复冻结镜像并同步被编辑格内容。"""
+        """单元格编辑结束（V3.2）：恢复冻结镜像并同步被编辑格内容。
+
+        V3.5.0：筛选生效时重新判定隐藏行，编辑后立即生效，不再要刷新一次。
+        """
+        if getattr(self, '_filter', None):
+            self._apply_filter()
         if getattr(self, 'frozen', None) is None:
             return
         r, c = self.table.currentRow(), self.table.currentColumn()
@@ -6406,13 +6468,13 @@ class MainWindow(QMainWindow):
         col = self.table.currentColumn()
         if not (0 <= col < len(cols)):
             col = 0
-        cd = cols[col]
-        # 收集该列现有填充色供"按颜色"筛选选择
+        # 收集当前分部所有列出现的填充色（对话框里可切换筛选列，颜色选项要齐）
         seen = []
-        for row in sec.rows:
-            colr = self.row_fill_for(row, cd)
-            if colr and colr not in seen:
-                seen.append(colr)
+        for cdef in cols:
+            for row in sec.rows:
+                colr = self.row_fill_for(row, cdef)
+                if colr and colr not in seen:
+                    seen.append(colr)
         colors = [('', '无填充')] + [(cv, cv) for cv in sorted(seen)]
         res = FilterDialog.exec(self, [c['title'] for c in cols], col, colors)
         if not res:
@@ -6420,6 +6482,25 @@ class MainWindow(QMainWindow):
         if res.get('clear'):
             self.clear_filter()
             return
+        # V3.5.0：筛选灵敏度——空内容/坏正则会"点了像没反应"，这里直接拦截并说明
+        if res['mode'] != '按填充颜色是' and not str(res.get('value', '')).strip():
+            QMessageBox.information(self, APP_NAME,
+                                    '筛选内容为空，没有可筛选的条件。\n'
+                                    '请输入内容后再确定；要取消筛选请点「清除筛选」。')
+            return
+        if res['mode'] == '正则匹配':
+            import re
+            try:
+                re.compile(str(res.get('value', '')))
+            except re.error as e:
+                QMessageBox.information(self, APP_NAME, '正则表达式有误：%s' % e)
+                return
+        # V3.5.0 关键修复：必须用对话框里选中的列，不能用打开前的当前列，
+        # 否则用户在下拉框换列后“筛选没反应/隐藏错行”。
+        sel_col = res.get('col', col)
+        if not (0 <= sel_col < len(cols)):
+            sel_col = col
+        cd = cols[sel_col]
         self._filter = {'key': cd['key'], 'mode': res['mode'],
                         'value': res['value'], 'color_value': res['color_value']}
         self._apply_filter()
@@ -6464,6 +6545,45 @@ class MainWindow(QMainWindow):
         self._apply_filter()
         self.status.showMessage('已清除筛选，显示全部行' if had
                                 else '当前没有筛选', 2500)
+
+    def update_selection_stats(self, *args):
+        """WPS 式选区统计：单选/多选工程量列时显示 求和 / 平均值 / 计数。
+
+        只统计“工程量”列里实际有数值的单元格；选中整行时也会带上该列的格子。
+        """
+        lab = getattr(self, 'lbl_sel_stats', None)
+        if lab is None:
+            return
+        nums = []
+        try:
+            rows = self.current_section.rows
+            value_cols = {c for c in range(self.table.columnCount())
+                          if self.col_key(c) == 'value'}
+            for idx in self.table.selectionModel().selectedIndexes():
+                if not idx.isValid() or idx.column() not in value_cols:
+                    continue
+                if idx.row() >= len(rows):
+                    continue
+                v = rows[idx.row()].value
+                if v is None or v == '':
+                    continue
+                try:
+                    nums.append(float(v))
+                except (TypeError, ValueError):
+                    continue
+        except Exception:
+            nums = []
+        if not nums:
+            lab.setText('')
+            return
+        total = sum(nums)
+
+        def _stat_fmt(v):
+            s = fmt_num(v, 3)
+            return s.rstrip('0').rstrip('.') if '.' in s else s
+
+        lab.setText('求和=%s   平均值=%s   计数=%d'
+                    % (_stat_fmt(total), _stat_fmt(total / len(nums)), len(nums)))
 
     def show_symbol_picker(self, btn=None):
         """弹出特殊符号面板（工程符号 + 钢筋等级 + 直径/半径），点选即插入。"""
