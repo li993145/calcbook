@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """工程量计算书 —— 桌面主界面"""
 
-import sys, os, json, time, datetime, uuid, ctypes, re, tempfile, traceback
+import sys, os, json, time, datetime, uuid, ctypes, re, tempfile, traceback, shutil
 from decimal import Decimal, ROUND_HALF_UP
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QSplitter,
@@ -34,7 +34,7 @@ from ui_sortfilter import fill_series
 from core.highlighter import FormulaHighlighter, compute_runs, FCOLOR
 
 APP_NAME = "工程量计算书"
-APP_VER = "2.10.0"
+APP_VER = "3.0.0"
 FILE_EXT = '.gcls'          # 工程文件后缀（内容仍是 JSON，便于排查与迁移）
 
 # ---- 工程文件关联（让资源管理器把 .gcls 显示成软件图标）----
@@ -95,7 +95,7 @@ def current_exe():
 
 
 def register_file_assoc():
-    """把 .gcls 关联到本程序：默认图标 = 本 exe 图标，双击 = 用本程序打开。
+    """把 .gcls 关联到本程序：默认图标 = 独立文件图标，双击 = 用本程序打开。
 
     只写 HKCU，不需要管理员权限。返回 (是否成功, 附加信息)。
     """
@@ -113,7 +113,7 @@ def register_file_assoc():
         set_val(r'Software\Classes\%s' % FILE_EXT, '', ASSOC_PROGID)
         set_val(r'Software\Classes\%s' % FILE_EXT, 'Content Type', 'application/x-calcbook')
         set_val(r'Software\Classes\%s' % ASSOC_PROGID, '', ASSOC_DESC)
-        set_val(r'Software\Classes\%s\DefaultIcon' % ASSOC_PROGID, '', '%s,0' % exe)
+        set_val(r'Software\Classes\%s\DefaultIcon' % ASSOC_PROGID, '', file_icon_path())
         set_val(r'Software\Classes\%s\shell\open\command' % ASSOC_PROGID, '',
                 '"%s" "%%1"' % exe)
         # 通知资源管理器：关联变了，刷新图标
@@ -126,6 +126,26 @@ def register_file_assoc():
         return False, str(e)
 
 
+def file_icon_path():
+    """工程文件（.gcls）专用图标的稳定路径。
+
+    onefile exe 每次运行解压到临时目录，路径会变；把随包的 calcbook_file.ico
+    复制到 %LOCALAPPDATA%\\CalcBook\\ 下做注册表 DefaultIcon 的稳定指向。
+    """
+    base = os.path.join(os.environ.get('LOCALAPPDATA') or os.path.expanduser('~'),
+                        'CalcBook')
+    dst = os.path.join(base, 'calcbook_file.ico')
+    src = os.path.join(getattr(sys, '_MEIPASS', HERE), 'calcbook_file.ico')
+    try:
+        if os.path.exists(src) and (not os.path.exists(dst) or
+                                    os.path.getsize(dst) != os.path.getsize(src)):
+            os.makedirs(base, exist_ok=True)
+            shutil.copyfile(src, dst)
+    except Exception:
+        pass
+    return dst
+
+
 def assoc_needs_update():
     """注册表里的图标指向是否与当前 exe 不一致（换目录后需要重新注册）。"""
     exe = current_exe()
@@ -136,7 +156,7 @@ def assoc_needs_update():
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
                             r'Software\Classes\%s\DefaultIcon' % ASSOC_PROGID) as k:
             val, _ = winreg.QueryValueEx(k, '')
-        return os.path.normcase(val.split(',')[0]) != os.path.normcase(exe)
+        return os.path.normcase(val.split(',')[0]) != os.path.normcase(file_icon_path())
     except Exception:
         return True
 
@@ -3407,8 +3427,9 @@ class MainWindow(QMainWindow):
         self.table.setAlternatingRowColors(True)
         self.table.setWordWrap(False)
         self.table.setSelectionBehavior(QAbstractItemView.SelectItems)
+        # 单击只选中、不进编辑：Ctrl+C 直接复制选中区域（WPS/Excel 同款）。
+        # 双击 / F2 才进入单元格编辑。
         self.table.setEditTriggers(QAbstractItemView.DoubleClicked |
-                                   QAbstractItemView.SelectedClicked |
                                    QAbstractItemView.EditKeyPressed)
         # 实时双向同步：公式列单元格编辑时逐字同步到辅助框
         self.table.setItemDelegate(LiveSyncDelegate(self))
