@@ -32,7 +32,7 @@ from ui_printpreview import PrintPreviewPane
 from core.highlighter import FormulaHighlighter, compute_runs, FCOLOR
 
 APP_NAME = "工程量计算书"
-APP_VER = "2.9.0"
+APP_VER = "2.9.1"
 FILE_EXT = '.gcls'          # 工程文件后缀（内容仍是 JSON，便于排查与迁移）
 
 # ---- 工程文件关联（让资源管理器把 .gcls 显示成软件图标）----
@@ -3855,6 +3855,7 @@ class MainWindow(QMainWindow):
                         if row.error and key in ('formula', 'value'):
                             it.setForeground(QColor('C00000'))
                             it.setToolTip(row.error)
+                        self._apply_item_font(it, row, key)
                     bg = self.row_fill_for(row, cd)
                     if bg:
                         it.setBackground(QBrush(QColor(bg)))
@@ -4732,6 +4733,11 @@ class MainWindow(QMainWindow):
         menu.addAction('填充颜色…', self.fill_color_dialog)
         menu.addAction('清除填充', self.clear_fill)
         menu.addSeparator()
+        menu.addAction('单元格字体…', self.cell_font_setup)
+        menu.addAction('单元格字体颜色…', self.cell_font_color)
+        menu.addAction('清除单元格字体', self.cell_font_clear)
+        menu.addAction('选中单元格转半角（全角→半角）', self.narrow_cells)
+        menu.addSeparator()
         menu.addAction('标记为不计', self.toggle_no_count)
         menu.addSeparator()
         menu.addAction('设置打印区域（仅打印选中部分）', self.set_print_area)
@@ -5358,6 +5364,201 @@ class MainWindow(QMainWindow):
             self.apply_fill('', 'col')
         else:
             self.apply_fill('', 'cell')
+
+    # ---------------- 单元格字体（V2.9.1） ----------------
+    def _apply_item_font(self, item, row, key):
+        """把 row.cell_font[key] 里的字体属性应用到表格项。"""
+        spec = (getattr(row, 'cell_font', None) or {}).get(key)
+        if not spec:
+            return
+        font = QFont(spec.get('family') or self.table.font().family())
+        ps = int(spec.get('size') or 0)
+        if ps > 0:
+            font.setPointSize(ps)
+        font.setBold(bool(spec.get('bold')))
+        font.setItalic(bool(spec.get('italic')))
+        font.setUnderline(bool(spec.get('underline')))
+        font.setStrikeOut(bool(spec.get('strikeout')))
+        item.setFont(font)
+        color = spec.get('color')
+        if color:
+            item.setForeground(QColor(color))
+
+    def _font_target_cells(self):
+        """当前选中的目标格子：[(行对象, 列key, 行号, 列号)]，跳过“不计”列。"""
+        idxs = self.table.selectedIndexes()
+        sec = self.current_section
+        cells = []
+        for i in idxs:
+            r, c = i.row(), i.column()
+            key = self.col_key(c)
+            if not key or key == 'no_count':
+                continue
+            if 0 <= r < len(sec.rows):
+                cells.append((sec.rows[r], key, r, c))
+        return cells
+
+    def cell_font_setup(self):
+        """右键“单元格字体…”：给选中单元格设字体、字号、加粗、斜体、下划线、删除线。"""
+        cells = self._font_target_cells()
+        if not cells:
+            QMessageBox.information(self, APP_NAME, '请先选中要设置字体的单元格。')
+            return
+        spec0 = ((cells[0][0].cell_font or {}).get(cells[0][1])) or {}
+        base = self.table.font()
+        dlg = QDialog(self)
+        dlg.setWindowTitle('单元格字体（选中 %d 格）' % len(cells))
+        v = QVBoxLayout(dlg)
+        form = QFormLayout()
+        fam = QComboBox()
+        from PyQt5.QtGui import QFontDatabase
+        families = QFontDatabase().families()
+        fam.addItems(families)
+        fam.setEditable(True)
+        fam.setInsertPolicy(QComboBox.NoInsert)
+        fam.setCurrentText(spec0.get('family') or base.family())
+        size = QSpinBox()
+        size.setRange(6, 24)
+        size.setValue(int(spec0.get('size') or (base.pointSize() if base.pointSize() > 0 else 10)))
+        form.addRow('字体：', fam)
+        form.addRow('大小：', size)
+        checks = QHBoxLayout()
+        ck_bold = QCheckBox('加粗')
+        ck_italic = QCheckBox('斜体')
+        ck_under = QCheckBox('下划线')
+        ck_strike = QCheckBox('删除线')
+        for ck, k in ((ck_bold, 'bold'), (ck_italic, 'italic'),
+                      (ck_under, 'underline'), (ck_strike, 'strikeout')):
+            ck.setChecked(bool(spec0.get(k)))
+            checks.addWidget(ck)
+        checks.addStretch(1)
+        form.addRow(checks)
+        v.addLayout(form)
+        preview = QLabel('预览  123.45  挖基坑  A-001')
+        preview.setAlignment(Qt.AlignCenter)
+        preview.setStyleSheet('padding:8px; background:#fff; border:1px solid #cfd4da;')
+
+        def do_preview():
+            f = QFont(fam.currentText())
+            f.setPointSize(size.value())
+            f.setBold(ck_bold.isChecked())
+            f.setItalic(ck_italic.isChecked())
+            f.setUnderline(ck_under.isChecked())
+            f.setStrikeOut(ck_strike.isChecked())
+            preview.setFont(f)
+
+        for w in (fam, size, ck_bold, ck_italic, ck_under, ck_strike):
+            if hasattr(w, 'currentIndexChanged'):
+                try:
+                    w.currentIndexChanged.connect(do_preview)
+                except TypeError:
+                    pass
+            if hasattr(w, 'valueChanged'):
+                w.valueChanged.connect(do_preview)
+            if hasattr(w, 'stateChanged'):
+                w.stateChanged.connect(do_preview)
+        fam.lineEdit().textChanged.connect(do_preview)
+        do_preview()
+        v.addWidget(preview)
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.button(QDialogButtonBox.Ok).setText('确定')
+        bb.button(QDialogButtonBox.Cancel).setText('取消')
+        bb.accepted.connect(dlg.accept)
+        bb.rejected.connect(dlg.reject)
+        v.addWidget(bb)
+        if dlg.exec_() != QDialog.Accepted:
+            return
+        family = fam.currentText().strip()
+        if not family:
+            return
+        self.push_undo('单元格字体')
+        n = 0
+        for row, key, r, c in cells:
+            row.cell_font[key] = {
+                'family': family, 'size': int(size.value()),
+                'bold': ck_bold.isChecked(), 'italic': ck_italic.isChecked(),
+                'underline': ck_under.isChecked(), 'strikeout': ck_strike.isChecked(),
+                'color': (row.cell_font.get(key) or {}).get('color', ''),
+            }
+            n += 1
+        self.refresh_table()
+        self._dirty = True
+        self.status.showMessage('已设置 %d 个单元格的字体：%s %d 号'
+                                % (n, family, int(size.value())), 4000)
+
+    def cell_font_color(self):
+        """右键“单元格字体颜色…”：给选中单元格的文字设颜色。"""
+        cells = self._font_target_cells()
+        if not cells:
+            QMessageBox.information(self, APP_NAME, '请先选中要设置字体颜色的单元格。')
+            return
+        spec0 = ((cells[0][0].cell_font or {}).get(cells[0][1])) or {}
+        init = QColor(spec0.get('color') or '#000000')
+        color = QColorDialog.getColor(init, self, '单元格字体颜色')
+        if not color.isValid():
+            return
+        self.push_undo('单元格字体颜色')
+        n = 0
+        for row, key, r, c in cells:
+            spec = row.cell_font.setdefault(key, {})
+            spec['color'] = color.name()
+            n += 1
+        self.refresh_table()
+        self._dirty = True
+        self.status.showMessage('已设置 %d 个单元格的字体颜色：%s' % (n, color.name()), 4000)
+
+    def cell_font_clear(self):
+        """右键“清除单元格字体”：恢复默认字体与颜色。"""
+        cells = self._font_target_cells()
+        if not cells:
+            QMessageBox.information(self, APP_NAME, '请先选中要清除字体的单元格。')
+            return
+        self.push_undo('清除单元格字体')
+        n = 0
+        for row, key, r, c in cells:
+            if (row.cell_font or {}).pop(key, None) is not None:
+                n += 1
+        self.refresh_table()
+        self._dirty = True
+        self.status.showMessage('已清除 %d 个单元格的字体设置' % n, 4000)
+
+    def narrow_cells(self):
+        """右键“选中单元格转半角”：全角数字/字母/标点转半角（公式列除外，
+        公式里的全角括号是注释语法，转半角会改变语义）。"""
+        from ui_import import narrow_width
+        idxs = self.table.selectedIndexes()
+        sec = self.current_section
+        cols = self.project.columns
+        targets = []
+        for i in idxs:
+            r, c = i.row(), i.column()
+            if not (0 <= r < len(sec.rows)) or not (0 <= c < len(cols)):
+                continue
+            key = cols[c]['key']
+            if key in ('no_count', 'formula', 'value'):
+                continue
+            targets.append((sec.rows[r], key))
+        if not targets:
+            QMessageBox.information(self, APP_NAME, '请先选中要转半角的单元格。')
+            return
+        self.push_undo('单元格转半角')
+        n = 0
+        for row, key in targets:
+            if hasattr(row, key):
+                old = str(getattr(row, key) or '')
+            else:
+                old = str((row.custom or {}).get(key, ''))
+            new = narrow_width(old)
+            if new != old:
+                if hasattr(row, key):
+                    setattr(row, key, new)
+                else:
+                    row.custom[key] = new
+                n += 1
+        if n:
+            self.refresh_table()
+            self._dirty = True
+        self.status.showMessage('已把 %d 个单元格的文字转为半角' % n, 4000)
 
     # ---------------- 工具条补充功能 ----------------
     def show_recent(self):

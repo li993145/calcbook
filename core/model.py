@@ -45,6 +45,7 @@ class Row:
         self.custom = {}          # 自定义列值：{列key: 文本}
         self.fill = ''            # 整行填充色（#RRGGBB，空=无）
         self.cell_fill = {}       # 单元格填充色：{列key: #RRGGBB}
+        self.cell_font = {}       # 单元格字体：{列key: {family,size,bold,italic,underline,strikeout,color}}
         self.value = None
         self.error = None
         self.cleaned = ""
@@ -56,6 +57,7 @@ class Row:
                  error=self.error, cleaned=self.cleaned, fill=self.fill)
         d['custom'] = self.custom
         d['cell_fill'] = self.cell_fill
+        d['cell_font'] = self.cell_font
         return d
 
     @classmethod
