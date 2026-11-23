@@ -32,7 +32,7 @@ from ui_printpreview import PrintPreviewPane
 from core.highlighter import FormulaHighlighter, compute_runs, FCOLOR
 
 APP_NAME = "工程量计算书"
-APP_VER = "2.9.1"
+APP_VER = "2.9.2"
 FILE_EXT = '.gcls'          # 工程文件后缀（内容仍是 JSON，便于排查与迁移）
 
 # ---- 工程文件关联（让资源管理器把 .gcls 显示成软件图标）----
@@ -5193,6 +5193,8 @@ class MainWindow(QMainWindow):
                            lambda c=col: self.fill_color_dialog('col', c))
             menu.addAction(f'清除「{cd["title"]}」整列填充',
                            lambda c=col: self.apply_fill('', 'col', c))
+            menu.addAction(f'整列转半角「{cd["title"]}」（全角→半角）',
+                           lambda c=col: self.narrow_column(c))
             menu.addAction(f'本列列宽自适应「{cd["title"]}」',
                            lambda c=col: self.fit_column_widths([c]))
             menu.addSeparator()
@@ -5200,6 +5202,39 @@ class MainWindow(QMainWindow):
             menu.addSeparator()
             menu.addAction(f'删除列「{cd["title"]}」', lambda: self.delete_column(col))
         menu.exec_(h.mapToGlobal(pos))
+
+    def narrow_column(self, col):
+        """表头右键“整列转半角”：该列（全工程所有分部）全角数字/字母/标点
+        转半角并合并连续空格。公式/不计/工程量列跳过——公式里的全角括号
+        是注释语法，转半角会改变语义。"""
+        from ui_import import narrow_width
+        if not (0 <= col < len(self.project.columns)):
+            return
+        cd = self.project.columns[col]
+        key = cd['key']
+        if key in ('no_count', 'formula', 'value'):
+            QMessageBox.information(self, APP_NAME,
+                                    '「%s」列不能转半角：公式/工程量里的全角括号是注释语法，'
+                                    '转半角会改变计算结果。' % cd['title'])
+            return
+        self.push_undo('整列转半角')
+        n = 0
+        for sec in self.project.all_sections():
+            for row in sec.rows:
+                if hasattr(row, key):
+                    old = str(getattr(row, key, '') or '')
+                else:
+                    old = str((row.custom or {}).get(key, ''))
+                new = narrow_width(old)
+                if new != old:
+                    if hasattr(row, key):
+                        setattr(row, key, new)
+                    else:
+                        row.custom[key] = new
+                    n += 1
+        self.refresh_table()
+        self._dirty = True
+        self.status.showMessage('已将「%s」列 %d 个单元格转为半角（Ctrl+Z 可撤销）' % (cd['title'], n), 5000)
 
     def add_column(self, index):
         name, ok = QInputDialog.getText(self, '添加列', '列名称：', QLineEdit.Normal, '新列')
