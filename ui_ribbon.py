@@ -253,9 +253,8 @@ class RibbonPage(QWidget):
 class TitleStrip(QWidget):
     """窗口标题栏（自绘，取代 Windows 系统标题栏）：
 
-    左端一排小快捷图标（新建/打开/保存/打印…），紧跟着一块信息：
-    ``[软件图标] 软件名 V版本 | 工程文件名称 | <文件存放详细地址>``；
-    最右是最小化/最大化/关闭按钮。
+    左端直接显示 ``[软件图标] 软件名 V版本 | 工程文件名称 | [文件存放详细地址]``；
+    最右是最小化/最大化/关闭按钮。V3.3 起取消新建/打开/保存/打印四个小按钮。
     """
 
     maximizeRequested = pyqtSignal()
@@ -273,37 +272,15 @@ class TitleStrip(QWidget):
             QToolButton:pressed { background:#cddcf0; }
         ''')
         lay = QHBoxLayout(self)
-        lay.setContentsMargins(4, 1, 2, 1)
+        lay.setContentsMargins(8, 1, 2, 1)
         lay.setSpacing(1)
-        self.qat = []
-        app = QApplication.instance()
-        for item in (actions or []):
-            text, icon_key, slot = item[0], item[1], item[2]
-            b = QToolButton(self)
-            b.setIcon(make_icon(app, icon_key))
-            b.setIconSize(QSize(16, 16))
-            b.setAutoRaise(True)
-            b.setToolTip(text)
-            b.setFixedSize(24, 26)
-            b.clicked.connect(lambda checked=False, sl=slot: sl())
-            lay.addWidget(b)
-            self.qat.append(b)
-        # 左端分隔线，紧跟着就是信息块
-        # （软件图标 → 软件名+版本 → 工程文件名称 → <文件存放详细地址>）
-        self.sep_left = QFrame(self)
-        self.sep_left.setFrameShape(QFrame.VLine)
-        self.sep_left.setFixedHeight(16)
-        self.sep_left.setStyleSheet('color:#c2c8d2;')
-        lay.addSpacing(6)
-        lay.addWidget(self.sep_left)
-        lay.addSpacing(8)
-
-        # —— 信息块（左端）——
+        self.qat = []  # 兼容旧调用：不再生成快捷按钮
+        # 左端直接就是信息块：软件图标 → 软件名+版本 → 工程文件名称 → [文件存放详细地址]
         self._path = ''
         self._fname = ''
         self._path_max_w = 620
         self.lbl_icon = QLabel('')
-        self.lbl_icon.setFixedSize(16, 16)
+        self.lbl_icon.setFixedSize(20, 20)
         self.lbl_icon.setAlignment(Qt.AlignCenter)
         self.lbl_icon.setStyleSheet('background:transparent;')
         self.lbl_icon.setAttribute(Qt.WA_TransparentForMouseEvents, True)
@@ -435,28 +412,28 @@ class TitleStrip(QWidget):
     # ---------- 软件图标 ----------
     @staticmethod
     def _load_app_icon(icon_path=''):
-        """取 16px 的软件图标（优先用窗口图标，其次用 calcbook.png）。"""
-        app = QApplication.instance()
-        if app is not None:
-            ic = app.windowIcon()
-            if ic is not None and not ic.isNull():
-                pm = ic.pixmap(16, 16)
-                if pm is not None and not pm.isNull():
-                    return pm
+        """取软件图标（优先显式 ico/png 路径，QIcon 会挑最合适的尺寸）。"""
         cands = []
         if icon_path:
             cands.append(icon_path)
         base = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
-        cands.append(os.path.join(base, 'calcbook.png'))
-        cands.append(os.path.join(base, 'calcbook.ico'))
+        cands += [os.path.join(base, 'calcbook.ico'), os.path.join(base, 'calcbook.png')]
         for p in cands:
-            try:
-                if p and os.path.exists(p):
-                    pm = QPixmap(p)
-                    if not pm.isNull():
-                        return pm.scaled(16, 16, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-            except Exception:
-                continue
+            if p and os.path.exists(p):
+                try:
+                    pm = QIcon(p).pixmap(20, 20)
+                    if pm is not None and not pm.isNull():
+                        return pm
+                except Exception:
+                    continue
+        # 最后再退回程序自带的窗口图标
+        app = QApplication.instance()
+        if app is not None:
+            ic = app.windowIcon()
+            if ic is not None and not ic.isNull():
+                pm = ic.pixmap(20, 20)
+                if pm is not None and not pm.isNull():
+                    return pm
         return None
 
     # ---------- 软件名/版本 + 工程文件名称 + 文件位置 ----------
@@ -497,7 +474,7 @@ class TitleStrip(QWidget):
         if abs(self.lbl_path.maximumWidth() - avail) >= 1:
             self.lbl_path.setMaximumWidth(avail)
         if not p:
-            self.lbl_path.setText('<未保存>')
+            self.lbl_path.setText('[未保存]')
             self.lbl_path.setToolTip('当前工程还没有保存到磁盘；Ctrl+S 保存后这里显示文件位置')
             self.lbl_path.setStyleSheet("color:#9aa2ae; font-family:'微软雅黑'; font-size:9pt;")
             return
@@ -507,9 +484,9 @@ class TitleStrip(QWidget):
             shown_path = os.path.normpath(p)
         except Exception:
             shown_path = p
-        # 留 16px 给首尾的 <>，否则末尾两个字符会被裁掉
+        # 方括号前后各留 16px，否则末尾两个字符会被裁掉
         shown = fm.elidedText(shown_path, Qt.ElideMiddle, max(40, avail - 16))
-        self.lbl_path.setText('<%s>' % shown)
+        self.lbl_path.setText('[%s]' % shown)
         tip = p
         if getattr(self, '_fname', ''):
             tip = '%s\n%s' % (self._fname, p)
