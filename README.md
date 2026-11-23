@@ -1,13 +1,25 @@
 # 工程量计算书 CalcBook
 
 > 基于 **Python + PyQt5** 的建筑工程量计算书工具 —— 分层目录、公式自动计算、单位精度控制、打印导出。
-> 当前版本：**V2.9.2**
+> 当前版本：**V2.10.0**
 
 ![主界面](docs/screenshot-main.png)
 
 ---
 
-## 本次修订（V2.9.1）
+## 本次修订（V2.10.0）
+
+- **复制粘贴完善**：Ctrl+C / 右键复制改为**按选中区域**复制（原来是整行复制），Ctrl+X 剪切行，Ctrl+V 粘贴自动扩展行。
+- **拖动填充柄（自动序号）**：选中单元格后右下角有蓝色小方块，按住向下 / 向右拖动即 WPS 式填充——纯数字自动等差递增（选两格可推断步长，如 1、3 → 5、7）、尾号数字自动进位（`A-001` → `A-002`、`TG102.103` → `TG102.104`，保留前导零）、汉字 / 公式循环复制；向上 / 向左拖动递减。可撤销。
+- **格式刷**：选中源单元格 → 功能区「计算书编辑 → 格式刷」（或右键菜单），点击 / 拖选目标区域即可刷字体 + 底色，Esc 取消，可撤销。
+- **排序**：右键「排序…」或功能区按钮——按数字 / 按文本 / 按填充颜色 / **按正则提取**（正则捕获组可转数字比较，如 `深度(\d+)`），升序降序，可撤销。
+- **筛选**：右键「筛选…」——等于 / 不等于 / 包含 / 开头是 / 数字比较 / **正则匹配** / 按填充颜色；只隐藏不删数据，刷新后保持，「清除筛选」一键恢复。
+
+### V2.9.2
+
+- **列头右键「整列转半角」**：一次把该列（全工程所有分部）的全角数字 / 字母 / 标点 / 空格转成半角，修掉 V2.9.0 导入数据里的"全角分散"显示；公式列自动跳过。
+
+### V2.9.1
 
 - **单元格字体设置**：选中单元格（可框选）右键「单元格字体…」，可设字体、字号、加粗、斜体、下划线、删除线，带实时预览；「单元格字体颜色…」单独设文字颜色；「清除单元格字体」恢复默认。设置随工程保存，Ctrl+Z 可撤销。
 - **全角字符修正**：导入表格时自动把全角数字 / 字母 / 标点 / 空格转成半角（如 `１２３（ｍ３）` → `123(m3)`、全角空格合并），解决导入后文字"像全角、很分散"的问题；已有数据可右键「选中单元格转半角（全角→半角）」一键修正（公式列除外，公式里全角括号是注释语法不动它）。
@@ -106,14 +118,14 @@
 
 ### 方式一：直接下载可执行文件（推荐给非技术用户）
 
-下载 `CalcBook-v2.9.2.exe`（约 58MB），双击运行，免安装：
+下载 `CalcBook-v2.10.0.exe`（约 58MB），双击运行，免安装：
 
-- [Gitee Release（推荐国内用户，点附件下载）](https://gitee.com/li993145/calcbook/releases/tag/v2.9.2)
-- [GitHub Release](https://github.com/li993145/calcbook/releases/tag/v2.9.2)
+- [Gitee Release（推荐国内用户，点附件下载）](https://gitee.com/li993145/calcbook/releases/tag/v2.10.0)
+- [GitHub Release](https://github.com/li993145/calcbook/releases/tag/v2.10.0)
 
-> 本版本更新明细见 [RELEASE_NOTES_v2.9.2.md](RELEASE_NOTES_v2.9.2.md)。
+> 本版本更新明细见 [RELEASE_NOTES_v2.10.0.md](RELEASE_NOTES_v2.10.0.md)。
 >
-> 历史版本：[V2.9.1](https://gitee.com/li993145/calcbook/releases/tag/v2.9.1)（[更新明细](RELEASE_NOTES_v2.9.1.md)）、[V2.9.0](https://gitee.com/li993145/calcbook/releases/tag/v2.9.0)（[更新明细](RELEASE_NOTES_v2.9.0.md)）、[V2.8.3](https://gitee.com/li993145/calcbook/releases/tag/v2.8.3)（[更新明细](RELEASE_NOTES_v2.8.3.md)）、[V2.8.2](https://gitee.com/li993145/calcbook/releases/tag/v2.8.2)（[更新明细](RELEASE_NOTES_v2.8.2.md)）、[V2.8.1](https://gitee.com/li993145/calcbook/releases/tag/v2.8.1)（[更新明细](RELEASE_NOTES_v2.8.1.md)）、[V2.8.0](https://gitee.com/li993145/calcbook/releases/tag/v2.8.0)（[更新明细](RELEASE_NOTES_v2.8.0.md)）、[V2.7.3](https://gitee.com/li993145/calcbook/releases/tag/v2.7.3)（[更新明细](RELEASE_NOTES_v2.7.3.md)）、[V2.7.2](https://github.com/li993145/calcbook/releases/tag/v2.7.2)（[更新明细](RELEASE_NOTES_v2.7.2.md)）、[V2.7.1](https://github.com/li993145/calcbook/releases/tag/v2.7.1)（[更新明细](RELEASE_NOTES_v2.7.1.md)）、[V2.7.0](https://github.com/li993145/calcbook/releases/tag/v2.7.0)（[更新明细](RELEASE_NOTES_v2.7.0.md)）、[V2.6.0](https://github.com/li993145/calcbook/releases/tag/v2.6.0)（[更新明细](RELEASE_NOTES_v2.6.0.md)）、[V2.5.0](https://github.com/li993145/calcbook/releases/tag/v2.5.0)（[更新明细](RELEASE_NOTES_v2.5.0.md)）。
+> 历史版本：[V2.9.2](https://gitee.com/li993145/calcbook/releases/tag/v2.9.2)（[更新明细](RELEASE_NOTES_v2.9.2.md)）、[V2.9.1](https://gitee.com/li993145/calcbook/releases/tag/v2.9.1)（[更新明细](RELEASE_NOTES_v2.9.1.md)）、[V2.9.0](https://gitee.com/li993145/calcbook/releases/tag/v2.9.0)（[更新明细](RELEASE_NOTES_v2.9.0.md)）、[V2.8.3](https://gitee.com/li993145/calcbook/releases/tag/v2.8.3)（[更新明细](RELEASE_NOTES_v2.8.3.md)）、[V2.8.2](https://gitee.com/li993145/calcbook/releases/tag/v2.8.2)（[更新明细](RELEASE_NOTES_v2.8.2.md)）、[V2.8.1](https://gitee.com/li993145/calcbook/releases/tag/v2.8.1)（[更新明细](RELEASE_NOTES_v2.8.1.md)）、[V2.8.0](https://gitee.com/li993145/calcbook/releases/tag/v2.8.0)（[更新明细](RELEASE_NOTES_v2.8.0.md)）、[V2.7.3](https://gitee.com/li993145/calcbook/releases/tag/v2.7.3)（[更新明细](RELEASE_NOTES_v2.7.3.md)）、[V2.7.2](https://github.com/li993145/calcbook/releases/tag/v2.7.2)（[更新明细](RELEASE_NOTES_v2.7.2.md)）、[V2.7.1](https://github.com/li993145/calcbook/releases/tag/v2.7.1)（[更新明细](RELEASE_NOTES_v2.7.1.md)）、[V2.7.0](https://github.com/li993145/calcbook/releases/tag/v2.7.0)（[更新明细](RELEASE_NOTES_v2.7.0.md)）、[V2.6.0](https://github.com/li993145/calcbook/releases/tag/v2.6.0)（[更新明细](RELEASE_NOTES_v2.6.0.md)）、[V2.5.0](https://github.com/li993145/calcbook/releases/tag/v2.5.0)（[更新明细](RELEASE_NOTES_v2.5.0.md)）。
 
 ### 方式二：从源码运行
 
