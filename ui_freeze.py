@@ -21,6 +21,27 @@ def _clone(item):
     return QTableWidgetItem(item)
 
 
+class _MirrorTable(QTableWidget):
+    """冻结区镜像：自身不滚动，鼠标滚轮转给主表（WPS 同款体验）。"""
+
+    def __init__(self, panes):
+        super().__init__(0, 0, panes.t)
+        self._panes = panes
+
+    def wheelEvent(self, ev):
+        try:
+            dx = ev.angleDelta().x()
+            if abs(dx) > abs(ev.angleDelta().y()) and dx:
+                # 横向滚轮：Qt 默认只处理纵向，这里直接滚主表横向滚动条
+                bar = self._panes.t.horizontalScrollBar()
+                bar.setValue(bar.value() - int(dx / 8))
+            else:
+                # 滚轮落在冻结行/列上时，应该滚动的是整张表，而不是镜像本身
+                self._panes.t.wheelEvent(ev)
+        except Exception:
+            pass
+
+
 class FrozenPanes(object):
 
     def __init__(self, table):
@@ -62,7 +83,7 @@ class FrozenPanes(object):
 
     def _mk(self):
         t = self.t
-        w = QTableWidget(0, 0, t)
+        w = _MirrorTable(self)
         w.setFocusPolicy(Qt.NoFocus)
         w.setSelectionMode(QAbstractItemView.NoSelection)
         w.setEditTriggers(QAbstractItemView.NoEditTriggers)
