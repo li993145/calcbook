@@ -36,7 +36,7 @@ from core.highlighter import FormulaHighlighter, compute_runs, FCOLOR
 APP_NAME = "工程量计算书"
 # 本表内部复制/剪切的结构化剪贴板格式（多行整行复制 → 粘到任意位置插入行，不覆盖已有数据）
 CB_ROWS_MIME = 'application/x-calcbook-rows'
-APP_VER = "3.4.0"
+APP_VER = "3.4.1"
 FILE_EXT = '.gcls'          # 工程文件后缀（内容仍是 JSON，便于排查与迁移）
 
 # ---- 工程文件关联（让资源管理器把 .gcls 显示成软件图标）----
@@ -3076,18 +3076,10 @@ class MainWindow(QMainWindow):
         cv.setSpacing(0)
 
         # ===== 最上面一条：自绘标题栏 =====
-        # 左：常用函数快捷按钮 + 软件图标 + 软件名版本 | 工程文件名称 | [文件位置]；右：窗口按钮
-        # V3.4：取消“公式编辑”页签后，π / 插入函数 / round / 取整 放这里（WPS 式快捷键）
-        quick_funcs = [
-            ('π 圆周率  (插入公式)', 'π', lambda: self.insert_symbol('π')),
-            ('插入函数…  (全部内置函数)', 'ƒ', self.show_function_picker),
-            ('round 四舍五入  (插入公式)', 'R', lambda: self.insert_function('round()', 1)),
-            ('ceil 向上取整  (插入公式)', '↑', lambda: self.insert_function('ceil()', 1)),
-            ('floor 向下取整  (插入公式)', '↓', lambda: self.insert_function('floor()', 1)),
-            ('sin 正弦  (插入公式)', 'S', lambda: self.insert_function('sin()', 1)),
-            ('cos 余弦  (插入公式)', 'C', lambda: self.insert_function('cos()', 1)),
-        ]
-        self.title_strip = TitleStrip(quick_funcs, parent=self,
+        # 左：软件图标（橘黄底） + 软件名版本 | 工程文件名称 | [文件位置]；右：窗口按钮
+        # V3.4.1：取消标题栏左侧的常用函数快捷按钮，也不挪到其它位置；
+        #          函数仍通过“插入函数”入口和 F4–F7 使用。
+        self.title_strip = TitleStrip(parent=self,
                                       icon_path=getattr(self, 'app_icon_path', ''))
         try:
             self.title_strip.minimizeRequested.connect(self._win_minimize)
@@ -3140,6 +3132,7 @@ class MainWindow(QMainWindow):
                     ('格式刷', 'copy', self.start_format_painter, '', False),
                     ('排序', 'settings', self.sort_dialog, '', False),
                     ('筛选', 'settings', self.filter_dialog, '', False),
+                    ('清除筛选', 'close', self.clear_filter, '', False),
                     ('数据列定义', 'settings', self.column_setup, '', False),
                     ('选项配置', 'settings', self.autosave_settings, '', False),
                 ]),
@@ -3896,7 +3889,7 @@ class MainWindow(QMainWindow):
 
         <h3 style="color:#2f5597;">二、界面布局与标题栏</h3>
         <ul>
-        <li>最上面是自绘标题栏：左端是一排<b>常用函数快捷按钮</b>（π 圆周率、插入函数、round 四舍五入、向上 / 向下取整、sin、cos），点击即可把函数插入当前公式；紧跟着显示 软件图标 → 软件名与版本 → 工程文件名称 → <code>[文件存放详细地址]</code>；最右端是最小化 / 最大化 / 关闭。未保存的工程显示 <code>[未保存]</code>。</li>
+        <li>最上面是自绘标题栏：左端显示<b>橘黄底的软件图标</b> → 软件名与版本 → 工程文件名称 → <code>[文件存放详细地址]</code>；不再显示常用函数快捷按钮；最右端是最小化 / 最大化 / 关闭。未保存的工程显示 <code>[未保存]</code>。</li>
         <li>标题栏空白处按住可拖动窗口，双击最大化 / 还原；鼠标移到窗口边缘可拖拽调整大小。路径过长时中间省略，鼠标悬停可看全路径。</li>
         <li>Ribbon 三个页签：<b>计算书编辑</b>（文件、编辑、格式、计算书等）、<b>数据输出</b>（导出、打印、打印预览、页面设置）、<b>关于产品</b>（使用说明、关于产品）。<b>「公式编辑」页签已取消</b>，所有内置函数改由标题栏快捷按钮与「插入函数」面板调用；「查看公式」「重算」按钮也已取消；F4–F7 插入括号的快捷键仍可用。</li>
         <li>左侧为项目结构树与常量框，中间为公式辅助框、快捷操作行和工作区表格，右侧为分类汇总面板。各面板分割条上有小箭头按钮可收起 / 展开（宽度会被记住）；汇总标题行的「⤢」可隐藏主工作区、放大查看汇总，再点「⤡」还原。</li>
@@ -3920,6 +3913,7 @@ class MainWindow(QMainWindow):
         <li><b>列宽 / 行高</b>：<b>默认自适应</b>——列宽按内容计算并铺满窗口，行高按内容撑高（长公式 / 长备注自动换行），无需手点。手动拖过列宽后自动列宽会关闭，可在左上角角标右键重新勾选「自动列宽 / 自动行高」恢复；把鼠标移到两列（或两行）表头之间的分隔线上<b>双击</b>可只自适应该列 / 该行。</li>
         <li><b>冻结窗格</b>：右键行号「冻结至本行」/ 列头「冻结至本列」，可同时冻结行列；鼠标停在冻结区上滚轮照常滚动整表，冻结区外数据正常显示；冻结区单元格仍可双击编辑；左上角右键「取消全部冻结」。设置随工程保存。</li>
         <li><b>撤销 / 恢复、查找</b>：Ctrl+Z 撤销、Ctrl+Y 恢复，逐字输入公式只算一步；Ctrl+F 打开查找，可按编号 / 项目名称 / 单位 / 部位 / 计算公式 / 备注或「全部字段」搜索，回车逐个定位到对应行。</li>
+        <li><b>排序 / 筛选</b>：右键或工具栏「计算书编辑」可排序、筛选（等于 / 包含 / 数字比较 / 正则 / 按填充颜色等），只隐藏不删数据、刷新后保持；<b>取消筛选</b>有三个入口：筛选窗口内点「清除筛选」、工具栏「清除筛选」、右键「清除筛选」，点后立即恢复显示全部行。</li>
         </ul>
 
         <h3 style="color:#2f5597;">五、公式与函数</h3>
@@ -6423,6 +6417,9 @@ class MainWindow(QMainWindow):
         res = FilterDialog.exec(self, [c['title'] for c in cols], col, colors)
         if not res:
             return
+        if res.get('clear'):
+            self.clear_filter()
+            return
         self._filter = {'key': cd['key'], 'mode': res['mode'],
                         'value': res['value'], 'color_value': res['color_value']}
         self._apply_filter()
@@ -6453,7 +6450,7 @@ class MainWindow(QMainWindow):
         # 筛选生效时把末尾的空占位行也藏起来
         for i in range(len(sec.rows), self.table.rowCount()):
             self.table.setRowHidden(i, True)
-        self.status.showMessage('筛选中：「%s」%s%s，显示 %d/%d 行（右键→清除筛选）'
+        self.status.showMessage('筛选中：「%s」%s%s，显示 %d/%d 行（工具栏/右键/筛选窗口均可取消筛选）'
                                 % (cd['title'], f['mode'],
                                    f['value'] or f.get('color_value') or '',
                                    shown, len(sec.rows)), 6000)
@@ -6461,10 +6458,12 @@ class MainWindow(QMainWindow):
             self.frozen.sync_hidden()
 
     def clear_filter(self):
-        if self._filter:
-            self._filter = None
-            self._apply_filter()
-            self.status.showMessage('已清除筛选', 2500)
+        """取消筛选：无条件显示全部行（含冻结镜像），没有筛选时给出明确提示。"""
+        had = self._filter is not None
+        self._filter = None
+        self._apply_filter()
+        self.status.showMessage('已清除筛选，显示全部行' if had
+                                else '当前没有筛选', 2500)
 
     def show_symbol_picker(self, btn=None):
         """弹出特殊符号面板（工程符号 + 钢筋等级 + 直径/半径），点选即插入。"""

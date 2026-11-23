@@ -253,9 +253,10 @@ class RibbonPage(QWidget):
 class TitleStrip(QWidget):
     """窗口标题栏（自绘，取代 Windows 系统标题栏）：
 
-    左端一排小快捷按钮（V3.4 起为常用函数：π / 插入函数 / round / 取整），
-    紧跟着一块信息：``[软件图标] 软件名 V版本 | 工程文件名称 | [文件存放详细地址]``；
+    左端一块信息：``[橘黄底软件图标] 软件名 V版本 | 工程文件名称 | [文件存放详细地址]``；
     最右是最小化/最大化/关闭按钮。
+
+    V3.4.1 起不再显示快捷函数按钮（构造参数 actions 仅为兼容旧调用保留）。
     """
 
     maximizeRequested = pyqtSignal()
@@ -275,7 +276,7 @@ class TitleStrip(QWidget):
         lay = QHBoxLayout(self)
         lay.setContentsMargins(8, 1, 2, 1)
         lay.setSpacing(1)
-        # V3.4：左端恢复一排常用函数快捷按钮（π / 插入函数 / round / 取整…）
+        # 兼容旧调用：V3.4.1 起主程序不再传入 actions，这里不会显示任何快捷按钮
         self.qat = []
         app = QApplication.instance()
         for item in (actions or []):
@@ -306,9 +307,11 @@ class TitleStrip(QWidget):
         self._fname = ''
         self._path_max_w = 620
         self.lbl_icon = QLabel('')
-        self.lbl_icon.setFixedSize(20, 20)
+        self.lbl_icon.setFixedSize(24, 24)
         self.lbl_icon.setAlignment(Qt.AlignCenter)
-        self.lbl_icon.setStyleSheet('background:transparent;')
+        # V3.4.1：橘黄底色 + 圆角，左上角软件图标更显眼
+        self.lbl_icon.setStyleSheet(
+            'background:#ff8c00; border:1px solid #d97700; border-radius:4px;')
         self.lbl_icon.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         self.lbl_icon.setToolTip('工程量计算书')
         self._app_pixmap = self._load_app_icon(icon_path)
