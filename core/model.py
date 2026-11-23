@@ -46,6 +46,7 @@ class Row:
         self.fill = ''            # 整行填充色（#RRGGBB，空=无）
         self.cell_fill = {}       # 单元格填充色：{列key: #RRGGBB}
         self.cell_font = {}       # 单元格字体：{列key: {family,size,bold,italic,underline,strikeout,color}}
+        self.cell_align = {}      # 单元格对齐：{列key: 'left'/'center'/'right'}（空=默认对齐）
         self.value = None
         self.error = None
         self.cleaned = ""
@@ -58,6 +59,7 @@ class Row:
         d['custom'] = self.custom
         d['cell_fill'] = self.cell_fill
         d['cell_font'] = self.cell_font
+        d['cell_align'] = self.cell_align
         return d
 
     @classmethod

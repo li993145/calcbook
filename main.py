@@ -34,7 +34,7 @@ from ui_sortfilter import fill_series
 from core.highlighter import FormulaHighlighter, compute_runs, FCOLOR
 
 APP_NAME = "工程量计算书"
-APP_VER = "3.0.0"
+APP_VER = "3.1.0"
 FILE_EXT = '.gcls'          # 工程文件后缀（内容仍是 JSON，便于排查与迁移）
 
 # ---- 工程文件关联（让资源管理器把 .gcls 显示成软件图标）----
@@ -4077,6 +4077,7 @@ class MainWindow(QMainWindow):
                             it.setForeground(QColor('C00000'))
                             it.setToolTip(row.error)
                         self._apply_item_font(it, row, key)
+                        self._apply_item_align(it, row, key)
                     bg = self.row_fill_for(row, cd)
                     if bg:
                         it.setBackground(QBrush(QColor(bg)))
@@ -4964,6 +4965,12 @@ class MainWindow(QMainWindow):
         menu.addAction('单元格字体…', self.cell_font_setup)
         menu.addAction('单元格字体颜色…', self.cell_font_color)
         menu.addAction('清除单元格字体', self.cell_font_clear)
+        align_menu = menu.addMenu('单元格对齐')
+        align_menu.addAction('靠左对齐', lambda: self.cell_align_set('left'))
+        align_menu.addAction('居中对齐', lambda: self.cell_align_set('center'))
+        align_menu.addAction('靠右对齐', lambda: self.cell_align_set('right'))
+        align_menu.addSeparator()
+        align_menu.addAction('恢复默认对齐', lambda: self.cell_align_set('default'))
         menu.addAction('选中单元格转半角（全角→半角）', self.narrow_cells)
         menu.addSeparator()
         menu.addAction('标记为不计', self.toggle_no_count)
@@ -5647,6 +5654,16 @@ class MainWindow(QMainWindow):
         if color:
             item.setForeground(QColor(color))
 
+    def _apply_item_align(self, item, row, key):
+        """把 row.cell_align[key] 里的对齐方式应用到表格项（V3.1）。"""
+        a = (getattr(row, 'cell_align', None) or {}).get(key)
+        if not a:
+            return
+        h = {'left': Qt.AlignLeft, 'center': Qt.AlignHCenter,
+             'right': Qt.AlignRight}.get(a)
+        if h is not None:
+            item.setTextAlignment(h | Qt.AlignVCenter)
+
     def _font_target_cells(self):
         """当前选中的目标格子：[(行对象, 列key, 行号, 列号)]，跳过“不计”列。"""
         idxs = self.table.selectedIndexes()
@@ -5784,6 +5801,29 @@ class MainWindow(QMainWindow):
         self.refresh_table()
         self._dirty = True
         self.status.showMessage('已清除 %d 个单元格的字体设置' % n, 4000)
+
+    # ---------------- 单元格对齐（V3.1） ----------------
+    def cell_align_set(self, align):
+        """右键“单元格对齐”：'left'/'center'/'right'，'default' 表示恢复默认。"""
+        cells = self._font_target_cells()
+        if not cells:
+            QMessageBox.information(self, APP_NAME, '请先选中要设置对齐的单元格。')
+            return
+        name = {'left': '靠左', 'center': '居中', 'right': '靠右',
+                'default': '默认'}.get(align, align)
+        self.push_undo('单元格对齐')
+        n = 0
+        for row, key, r, c in cells:
+            if getattr(row, 'cell_align', None) is None:
+                row.cell_align = {}
+            if align == 'default':
+                (row.cell_align or {}).pop(key, None)
+            else:
+                row.cell_align[key] = align
+            n += 1
+        self.refresh_table()
+        self._dirty = True
+        self.status.showMessage('已设置 %d 个单元格对齐方式：%s' % (n, name), 4000)
 
     def narrow_cells(self):
         """右键“选中单元格转半角”：全角数字/字母/标点转半角（公式列除外，
@@ -5984,7 +6024,8 @@ class MainWindow(QMainWindow):
         row = sec.rows[r]
         font = dict((row.cell_font or {}).get(key) or {})
         fill = self.row_fill_for(row, cols[c])
-        self._paint_fmt = {'font': font, 'fill': fill}
+        align = str((getattr(row, 'cell_align', None) or {}).get(key) or '')
+        self._paint_fmt = {'font': font, 'fill': fill, 'align': align}
         self.table.paint_mode = True
         self.table.setCursor(Qt.CrossCursor)
         tip = []
@@ -5992,6 +6033,8 @@ class MainWindow(QMainWindow):
             tip.append('字体')
         if fill:
             tip.append('底色')
+        if align:
+            tip.append('对齐')
         self.status.showMessage('格式刷已拾取（%s）：点击或拖选目标单元格，'
                                 'Esc 取消' % ('+'.join(tip) or '默认格式'), 6000)
 
@@ -6034,6 +6077,12 @@ class MainWindow(QMainWindow):
                     row.cell_fill[key] = fmt['fill']
                 else:
                     (row.cell_fill or {}).pop(key, None)
+                if getattr(row, 'cell_align', None) is None:
+                    row.cell_align = {}
+                if fmt.get('align'):
+                    row.cell_align[key] = fmt['align']
+                else:
+                    (row.cell_align or {}).pop(key, None)
                 n += 1
         self.refresh_table()
         self._dirty = True
