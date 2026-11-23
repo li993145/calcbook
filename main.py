@@ -39,7 +39,7 @@ from ui_report import ReportViewerDialog
 APP_NAME = "工程量计算书"
 # 本表内部复制/剪切的结构化剪贴板格式（多行整行复制 → 粘到任意位置插入行，不覆盖已有数据）
 CB_ROWS_MIME = 'application/x-calcbook-rows'
-APP_VER = "3.7.0"
+APP_VER = "3.7.1"
 FILE_EXT = '.gcls'          # 工程文件后缀（内容仍是 JSON，便于排查与迁移）
 # V3.6.1：备份默认放到固定目录，不再跟随工程文件所在目录；启动时自动创建。
 DEFAULT_BACKUP_DIR = r'D:\手算工程量计算书\bak'
@@ -598,6 +598,29 @@ class PasteTableWidget(QTableWidget):
         c0 = min(src[2], tgt[2]); c1 = max(src[3], tgt[3])
         return (r0, r1, c0, c1)
 
+    def _fill_preview_rect(self):
+        """填充拖动预览的虚线框（源区 + 目标区并集）。
+
+        返回 None 表示当前没有可预览的拖动。
+        单独拆出来是为了能直接断言「框的位置和大小 == 并集单元格区域」，
+        早前把 adjusted 的增量算成 br.right()-tl.left()，框会宽出一整格。
+        """
+        if self._fill_drag is None:
+            return None
+        tgt = self._fill_drag.get('tgt')
+        if not tgt:
+            return None
+        u = self._union(self._fill_drag['src'], tgt)
+        tl = self.visualRect(self.model().index(u[0], u[2]))
+        br = self.visualRect(self.model().index(u[1], u[3]))
+        if tl.width() <= 0 or br.width() <= 0:
+            return None
+        # adjusted 的右/下增量是相对「边的位置」加的，必须用
+        # br.right()-tl.right()、br.bottom()-tl.bottom()；
+        # 早前写成 br.right()-tl.left() 会多出一个整格的宽/高，
+        # 看着就像虚框拉到了旁边的单元格。
+        return tl.adjusted(0, 0, br.right() - tl.right(), br.bottom() - tl.bottom())
+
     def _rect_region(self, rect):
         """rect → QItemSelectionModel 选择（填充/刷子预览用）。"""
         r0, r1, c0, c1 = rect
@@ -672,14 +695,20 @@ class PasteTableWidget(QTableWidget):
         super().paintEvent(event)
         p = QPainter(self.viewport())
         # 填充拖动预览：源区 + 目标区整体虚线框
-        if self._fill_drag is not None and self._fill_drag.get('tgt'):
-            u = self._union(self._fill_drag['src'], self._fill_drag['tgt'])
-            tl = self.visualRect(self.model().index(u[0], u[2]))
-            br = self.visualRect(self.model().index(u[1], u[3]))
-            if tl.width() > 0 and br.width() > 0:
-                p.setPen(QPen(QColor('#2f7de0'), 1, Qt.DashLine))
-                p.drawRect(tl.adjusted(0, 0, br.right() - tl.left(),
-                                       br.bottom() - tl.top()))
+        rect = self._fill_preview_rect()
+        if rect is not None:
+            # 目标区铺一层淡蓝底色，一眼能看出「将要填到哪里」
+            src = self._fill_drag['src']
+            tgt = self._fill_drag.get('tgt')
+            if tgt:
+                tl = self.visualRect(self.model().index(tgt[0], tgt[2]))
+                br = self.visualRect(self.model().index(tgt[1], tgt[3]))
+                if tl.width() > 0 and br.width() > 0:
+                    area = tl.adjusted(0, 0, br.right() - tl.right(),
+                                       br.bottom() - tl.bottom())
+                    p.fillRect(area, QBrush(QColor(47, 125, 224, 38)))
+            p.setPen(QPen(QColor('#2f7de0'), 1, Qt.DashLine))
+            p.drawRect(rect)
             return
         # 平时画填充柄小方块
         hr = self._handle_rect()
@@ -4280,6 +4309,8 @@ class MainWindow(QMainWindow):
         <li>工具栏「层级设置」可改名、增删层级（例如改成 标段 / 单位工程 / 分部 / 分项）；新建节点自动使用下一级名称，如“分部工程2”。</li>
         <li>树右键：新建单项工程 / 新建下一级 / 新建同级 / 重命名 / 上移 / 下移 / 升级 / 降级 / 删除 / <b>复制本节点 / 粘贴为下级节点 / 粘贴为同级节点</b> / 层级设置 / 工程信息。右键会先选中该节点，不可用的项变灰；删除后可用 Ctrl+Z 撤销。</li>
         <li><b>节点复制粘贴（V3.7.0）</b>：计算书、单项工程、单位工程、分部工程、分项工程<b>任意层级</b>都能自由复制。右键「复制本节点」把该节点连同<b>全部下级节点和数据行</b>一起复制；换到别的节点上右键「粘贴为下级节点」或「粘贴为同级节点」即可粘贴，重名会自动加序号（如“单位工程1(2)”），粘贴出来的节点 id 全新、互不影响；树里按 Ctrl+C / Ctrl+V 同样可以复制粘贴。</li>
+        <li><b>用分部打新（V3.7.1）</b>：Ribbon「编辑」组的<b>「用分部打新」</b>以当前选中的节点为模板复制一份（连同全部下级和数据行），重名自动加序号；<b>打完新会自动切到新节点、表格跟着显示新内容</b>，状态栏会告诉你打出了多少条计算式、几个下级节点。树里没选中节点时，会以「表格当前所在的节点」为模板。</li>
+        <li><b>撤销不再跳根目录（V3.7.1）</b>：在导航栏上做完操作后按 Ctrl+Z，<b>会回到操作前的那个节点</b>（以前会直接跳到根目录，还得重新一层层点回去）；Ctrl+Y 恢复时则回到操作后的新节点。</li>
         </ul>
 
         <h3 style="color:#2f5597;">四、项目选项与选项配置（V3.7.0 新增）</h3>
@@ -4299,7 +4330,8 @@ class MainWindow(QMainWindow):
         <li><b>填充颜色</b>：选中单元格或整行 / 整列后，点「格式」组「填充颜色」，选颜色和应用范围（整行 / 整列 / 仅选中单元格）。优先级为 单元格 &gt; 整行 &gt; 整列；「清除填充」按当前选择自动判断范围。颜色会带到打印、预览和 Excel。</li>
         <li><b>列宽 / 行高</b>：<b>默认自适应</b>——列宽按内容计算并铺满窗口，行高按内容撑高（长公式 / 长备注自动换行），无需手点。手动拖过列宽后自动列宽会关闭，可在左上角角标右键重新勾选「自动列宽 / 自动行高」恢复；把鼠标移到两列（或两行）表头之间的分隔线上<b>双击</b>可只自适应该列 / 该行。</li>
         <li><b>冻结窗格</b>：右键行号「冻结至本行」/ 列头「冻结至本列」，可同时冻结行列；鼠标停在冻结区上滚轮照常滚动整表，冻结区外数据正常显示；冻结区单元格仍可双击编辑；左上角右键「取消全部冻结」。设置随工程保存。</li>
-        <li><b>撤销 / 恢复、查找</b>：Ctrl+Z 撤销、Ctrl+Y 恢复，逐字输入公式只算一步；Ctrl+F 打开查找，可按编号 / 项目名称 / 单位 / 部位 / 计算公式 / 备注或「全部字段」搜索，回车逐个定位到对应行。</li>
+        <li><b>撤销 / 恢复、查找</b>：Ctrl+Z 撤销、Ctrl+Y 恢复，逐字输入公式只算一步；Ctrl+F 打开查找，可按编号 / 项目名称 / 单位 / 部位 / 计算公式 / 备注或「全部字段」搜索，回车逐个定位到对应行。<b>V3.7.1</b>：在导航栏上做完操作后撤销，<b>会回到操作前的那个节点</b>，不会跳到根目录。</li>
+        <li><b>拖动填充柄（自动序号，V3.7.1 修正）</b>：选中单元格后右下角有蓝色小方块，按住向下 / 向右拖动即自动填充序号（纯数字等差递增、尾号数字自动进位、汉字 / 公式循环复制）。拖动时的<b>虚线框正好罩住要填充的区域</b>（以前会宽出一格，看着像拉到旁边的单元格），目标区还铺了一层淡蓝底色，一眼能看出要填到哪里。</li>
         <li><b>排序 / 筛选</b>：右键或工具栏「计算书编辑」可排序、筛选——先在窗口里选<b>筛选列</b>（选哪列就筛哪列，V3.5 修复）再选条件（等于 / 包含 / 数字比较 / 正则 / 按填充颜色等），只隐藏不删数据、刷新后保持、编辑数据后立即重算；比较时自动统一全 / 半角与空格（V3.6），例如 <code>Ａ－００１</code> 可用 <code>A-001</code> 筛到；内容留空或正则写错会明确提示。<b>取消筛选</b>有三个入口：筛选窗口内点「清除筛选」、工具栏「清除筛选」、右键「清除筛选」，点后立即恢复显示全部行。</li>
         <li><b>选区统计与缩放</b>：单选 / 多选「工程量」列的数据，状态栏右下角实时显示 <code>求和=… 平均值=… 计数=…</code>（WPS 式，取代原来的固定小计）；多选 / 全选后普通左键点某格会恢复为只选这一格（V3.6），统计只算真正选中的格子。在表格上按住 <b>Ctrl + 鼠标滚轮</b> 可放大 / 缩小单元格显示（字号与手动行高列宽同比例，6–24 号字），不按 Ctrl 时滚轮照常滚动。</li>
         <li><b>默认列与列宽（V3.6）</b>：默认列顺序为 序号 / 编号 / 项目名称 / 单位 / 工程量 / 计算公式 / 图纸编号 / 大样图来源 / 不计 / 备注，宽度依次 80 / 135 / 340 / 80 / 100 / 600 / 150 / 150 / 80 / 200。列宽默认固定，新增列或刷新表格不会打乱已调好的宽度；表头右键可增删 / 重命名列、设置列宽（工具栏「数据列定义」按钮已取消）。<b>序号 / 编号 / 单位 / 工程量以及新增列默认居中对齐</b>，仍可右键单独改对齐。</li>
@@ -4319,9 +4351,11 @@ class MainWindow(QMainWindow):
         <h3 style="color:#2f5597;">七、打印与导出</h3>
         <ul>
         <li><b>打印 / 预览</b>：Ctrl+P 调出系统打印对话框，可选打印机、份数、页码范围，也可选“Microsoft Print to PDF”存成 PDF。「打印预览」按纸张实际比例分页显示，鼠标拖动页面上的蓝色虚线即可调整页边距，上方数值框同步更新；预览与实际打印的分页完全一致，<b>每页都会重复报表标题和表头行</b>。</li>
+        <li><b>长计算式不再被切一半（V3.7.1）</b>：计算式很长、在单元格里换行后高过整页时，打印会自动把<b>该行字号缩小</b>，保证<b>整行完整印在一页里</b>（以前是从页中间断开，看不全后半截）。缩过字号的行数会在打印完成后的状态栏提示。</li>
         <li><b>页面设置</b>：可设表头标题、页眉、<b>页脚左 / 中 / 右三栏</b>（一般放编制人、复核人、日期等签字信息）、上 / 下 / 左 / 右页边距、纸张方向、纸张大小（下拉列出系统打印机支持的纸型，选“自定义”可填宽高 mm）、水平 / 垂直对齐。打印和预览每页底部自动显示「第 X 页，共 Y 页」，无需手动填页码。</li>
         <li><b>打印区域</b>：在表格里框选单元格后<b>右键 →「设置打印区域」</b>，报表只输出选中的行列，小计也只算选中行；右键「清除打印区域」恢复打印整张计算书。快捷操作行的「打印选中区域」也可直接使用。</li>
         <li><b>查看报表（V3.7.0）</b>：点「数据导出」页签或 Ribbon 的<b>「查看报表」</b>，弹出<b>表格化的工程量报表</b>：左边是计算书 / 单位 / 分部 / 分项的层级树，右边是编号、项目名称、单位、工程量、计算公式、图纸编号、备注，每个节点后面带合计，整体还有总计。<b>先在这里核对数据，确认没问题再打印或导出</b>，不用一进来就跳到打印预览。窗口底部可直接「刷新 / 打印 / 导出表格 / 页面设置」。</li>
+        <li><b>报表范围可选（V3.7.1）</b>：查看报表窗口顶部多了两个下拉——<b>「计算书」</b>选看哪一本（全部计算书 / 指定计算书），<b>「层级」</b>选看哪一层（全部层级 / 只看「单位工程」层 / 只看「分部工程」层…）。选某一层时按层汇总，每个节点列出「本级 N 条 / 含下级 M 条」和工程量合计，一眼看清各层汇总。窗口<b>打开时自动放大到编辑区大小</b>，不用缩在角落里看；<b>所有列（含项目名称列）都能拖动改宽度</b>，每个单元格加了<b>浅灰虚线框</b>，行列边界清楚不费劲。</li>
         <li><b>导出</b>：Ribbon「导出表格」生成 .xlsx（WPS / Excel 都能打开），包含各计算书与常量表；页面设置中的页脚三栏和自动页码也会写入导出文件。</li>
         </ul>
 
@@ -7601,40 +7635,101 @@ class MainWindow(QMainWindow):
         parts.append('</table>')
         return ''.join(parts)
 
-    def report_body_html(self):
-        """报表「正文」：数据表格（不含表头行）+ 页脚。"""
+    def report_body_html(self, content_w=None, content_h=None):
+        """报表「正文」：数据表格（不含表头行）+ 页脚。
+
+        content_w / content_h 传入时，会把「因换行而高过整页」的单元格
+        自动缩小字号 —— Qt 富文本会把高于一页的表格行从中间切断，
+        那样长计算式就印不全了；缩到一页以内才能整行完整印出来。
+        """
+        from ui_printpreview import measure_html
         va, ha = self._report_style()
         area = getattr(self, '_print_area', None)
         cols = self._active_columns()
         ncol = len(cols)
         pct = self._report_col_pct()
         parts = [self._report_table_open(pct)]
+        # 每页正文可用高度（扣掉每页都有的表头与页脚）
+        avail_h = 0.0
+        if content_w and content_h:
+            head_h = measure_html(self.report_head_html(), content_w)
+            avail_h = max(60.0, float(content_h) - head_h - 30.0)
+        self._print_shrunk = 0
+        self._print_oversize = 0
+
+        def cell_texts(r):
+            out = []
+            for cd in cols:
+                key = cd['key']
+                if key == 'no_count':
+                    text = '是' if r.no_count else ''
+                elif key == 'value':
+                    text = fmt_num(r.value, precision_for_unit(r.unit, self.precision))
+                elif hasattr(r, key):
+                    text = str(getattr(r, key))
+                else:
+                    text = str(r.custom.get(key, ''))
+                out.append(text)
+            return out
+
+        def row_html(r, font_pt):
+            """一行数据（font_pt 可调，用于超高行自动缩字号）。"""
+            texts = cell_texts(r)
+            tds = []
+            for k, cd in enumerate(cols):
+                key = cd['key']
+                text = texts[k]
+                # 填充色优先级：单元格 > 整行 > 整列
+                bg = (getattr(r, 'cell_fill', None) or {}).get(key) or \
+                    getattr(r, 'fill', '') or cd.get('fill', '') or ''
+                pad = self._report_row_pad(r)
+                style = ('font-size:%gpt;vertical-align:%s;padding-top:%dpx;'
+                         'padding-bottom:%dpx;' % (font_pt, va, pad, pad)) + \
+                        ('background:%s;' % bg if bg else '')
+                tds.append('<td width="%.1f%%" style="%s">%s</td>'
+                           % (pct[k] if k < len(pct) else 0, style, text))
+            return '<tr>' + ''.join(tds) + '</tr>'
+
+        def measure_row(html_row):
+            """单独量一行的高度（放进同样列宽的表格里量）。"""
+            html = ('<table border="1" cellspacing="0" cellpadding="3" width="100%" '
+                    'style="font-size:9pt;vertical-align:' + va + '">')
+            html += '<colgroup>' + ''.join('<col width="%.1f%%">' % x for x in pct)
+            html += '</colgroup>' + html_row + '</table>'
+            return measure_html(html, content_w)
+
+        def estimate_row_h(texts):
+            """粗估行高（避免为每一行都建文档测高）。"""
+            lines = 1
+            for t, p in zip(texts, pct):
+                cpl = max(4.0, (content_w * p / 100.0) / 9.0)
+                lines = max(lines, int(len(t) / cpl) + 1)
+            return lines * 16.0 + 14.0
 
         def walk(sec, level=0):
             parts.append(f'<tr><td colspan="{ncol}" style="background:#fff2cc"><b>{"　"*level}{sec.name}</b></td></tr>')
             for ri, r in enumerate(sec.rows):
                 if area and (sec is not area.get('section') or ri not in area.get('rows', ())):
                     continue
-                tds = []
-                for k, cd in enumerate(cols):
-                    key = cd['key']
-                    if key == 'no_count':
-                        text = '是' if r.no_count else ''
-                    elif key == 'value':
-                        text = fmt_num(r.value, precision_for_unit(r.unit, self.precision))
-                    elif hasattr(r, key):
-                        text = str(getattr(r, key))
-                    else:
-                        text = str(r.custom.get(key, ''))
-                    # 填充色优先级：单元格 > 整行 > 整列
-                    bg = (getattr(r, 'cell_fill', None) or {}).get(key) or \
-                        getattr(r, 'fill', '') or cd.get('fill', '') or ''
-                    pad = self._report_row_pad(r)
-                    style = ('vertical-align:%s;padding-top:%dpx;padding-bottom:%dpx;'
-                             % (va, pad, pad)) + ('background:%s;' % bg if bg else '')
-                    tds.append('<td width="%.1f%%" style="%s">%s</td>'
-                               % (pct[k] if k < len(pct) else 0, style, text))
-                parts.append('<tr>' + ''.join(tds) + '</tr>')
+                texts = cell_texts(r)
+                html_row = row_html(r, 9.0)
+                if avail_h:
+                    if estimate_row_h(texts) > avail_h * 0.75:
+                        h = measure_row(html_row)
+                        if h > avail_h:
+                            done = False
+                            for pt in (8.0, 7.0, 6.5, 6.0, 5.5, 5.0):
+                                trial = row_html(r, pt)
+                                if measure_row(trial) <= avail_h:
+                                    html_row = trial
+                                    self._print_shrunk += 1
+                                    done = True
+                                    break
+                            if not done:
+                                # 缩到最小仍超页：交给 Qt 切分，至少内容都在
+                                html_row = row_html(r, 5.0)
+                                self._print_oversize += 1
+                parts.append(html_row)
             if area and sec is area.get('section'):
                 vals = [r.value for ri, r in enumerate(sec.rows)
                         if ri in area.get('rows', ()) and not getattr(r, 'no_count', False)
@@ -7663,6 +7758,22 @@ class MainWindow(QMainWindow):
         # 页脚统一由 ReportRenderer 在每页底部绘制（左/中/右 + 自动页码），这里不再插入
         return ''.join(parts)
 
+    def _report_page_px(self):
+        """按当前纸张 / 方向 / 页边距算可打印区尺寸（文档像素）。"""
+        from ui_printpreview import px_per_cm, paper_mm
+        rep = self.project.report or {}
+        w_mm, h_mm = paper_mm(rep)
+        w_cm, h_cm = w_mm / 10.0, h_mm / 10.0
+        if rep.get('orientation') == 'landscape':
+            w_cm, h_cm = h_cm, w_cm
+        margins = rep.get('margins') or {}
+        m0 = float(rep.get('margin', 1.9))
+        mt = float(margins.get('top', m0)); mb = float(margins.get('bottom', m0))
+        ml = float(margins.get('left', m0)); mr = float(margins.get('right', m0))
+        cw = max(40.0, (w_cm - ml - mr) * px_per_cm())
+        ch = max(40.0, (h_cm - mt - mb) * px_per_cm())
+        return cw, ch
+
     def report_html(self, with_margins=True):
         """生成报表 HTML（整份 = 头部 + 正文）。with_margins=False 用于真实打印
         （页边距交给打印机）；打印时按页拆分，见 report_head_html / report_body_html。"""
@@ -7673,7 +7784,8 @@ class MainWindow(QMainWindow):
         mb = float(margins.get('bottom', m0))
         ml = float(margins.get('left', m0))
         mr = float(margins.get('right', m0))
-        inner = self.report_head_html() + self.report_body_html()
+        cw, ch = self._report_page_px()
+        inner = self.report_head_html() + self.report_body_html(cw, ch)
         if with_margins:
             return f'<div style="padding:{mt}cm {mr}cm {mb}cm {ml}cm;">{inner}</div>'
         return inner
@@ -7764,8 +7876,14 @@ class MainWindow(QMainWindow):
         except Exception as e:
             QMessageBox.warning(self, APP_NAME, '打印失败：%s' % e)
             return
-        self.status.showMessage('已发送到打印机：%s（共 %d 页，每页都带表头）'
-                                % (printer.printerName(), pages), 5000)
+        msg = '已发送到打印机：%s（共 %d 页，每页都带表头）' % (printer.printerName(), pages)
+        shrunk = getattr(self, '_print_shrunk', 0)
+        over = getattr(self, '_print_oversize', 0)
+        if shrunk:
+            msg += '；%d 行计算式过长已自动缩小字号以保证整行印全' % shrunk
+        if over:
+            msg += '；%d 行内容极长（即使缩小字号也超过一页）' % over
+        self.status.showMessage(msg, 6000)
 
     def paint_report_to_printer(self, printer):
         """逐页绘制到打印机：每页先画表头，再画该页正文。
@@ -7784,7 +7902,9 @@ class MainWindow(QMainWindow):
         cw = rect.width() / scale
         ch = rect.height() / scale
         fl, fc, fr = self.footer_fields()
-        renderer = ReportRenderer(self.report_head_html(), self.report_body_html(), cw, ch,
+        # 正文按真实可打印高度生成：过高的行自动缩字号，整行不会被页边界切断
+        body_html = self.report_body_html(cw, ch)
+        renderer = ReportRenderer(self.report_head_html(), body_html, cw, ch,
                                   fl, fc, fr, show_page_no=True)
         painter = QPainter(printer)
         try:
@@ -7920,17 +8040,28 @@ class MainWindow(QMainWindow):
             return repr(id(data))
 
     def push_undo(self, label='编辑', data=None):
-        """把改动前的快照压入撤销栈（必须在真正修改模型之前调用）。"""
+        """把改动前的快照压入撤销栈（必须在真正修改模型之前调用）。
+
+        栈里同时记住“改动前选中的节点 id”（sel_before）：
+        撤销时如果当前选中的节点在旧快照里已经不存在
+        （比如刚用“用分部打新”造出来的副本），就回到 sel_before，
+        而不是掉到根目录去。
+        """
         if data is None:
             data = self.snapshot_state()
         sig = self._state_sig(data)
         if self._undo_stack and self._undo_stack[-1][2] == sig:
             return False            # 状态没变化，不产生空的撤销步骤
-        self._undo_stack.append((label or '编辑', data, sig))
+        self._undo_stack.append((label or '编辑', data, sig,
+                                 self._current_sel_id(), None))
         if len(self._undo_stack) > 60:
             self._undo_stack.pop(0)
         self._redo_stack.clear()
         return True
+
+    def _current_sel_id(self):
+        """当前选中的节点 id（没有就 None）。"""
+        return getattr(self.current_section, 'id', None)
 
     def begin_edit(self, label='编辑'):
         """开始一段连续编辑（如逐字输入公式）：只在第一次记快照。"""
@@ -7966,9 +8097,11 @@ class MainWindow(QMainWindow):
             self.status.showMessage('没有可撤销的操作', 2000)
             return
         cur = self.snapshot_state()
-        label, data, _sig = self._undo_stack.pop()
-        self._redo_stack.append((label, cur, self._state_sig(cur)))
-        self._load_project_data(data)
+        label, data, _sig, sel_before, _sel_after = self._undo_stack.pop()
+        # 撤销前的当前选中（= 改动后的节点）留给“恢复”用
+        self._redo_stack.append((label, cur, self._state_sig(cur),
+                                 sel_before, self._current_sel_id()))
+        self._load_project_data(data, prefer_id=sel_before)
         self._dirty = True
         self.status.showMessage('已撤销：' + label, 2500)
 
@@ -7978,18 +8111,28 @@ class MainWindow(QMainWindow):
             self.status.showMessage('没有可恢复的操作', 2000)
             return
         cur = self.snapshot_state()
-        label, data, _sig = self._redo_stack.pop()
-        self._undo_stack.append((label, cur, self._state_sig(cur)))
-        self._load_project_data(data)
+        label, data, _sig, sel_before, sel_after = self._redo_stack.pop()
+        self._undo_stack.append((label, cur, self._state_sig(cur),
+                                 sel_before, sel_after))
+        # 恢复时优先回到“改动后”的节点（打新出来的副本等）
+        self._load_project_data(data, prefer_id=sel_after or sel_before,
+                                prefer_first=True)
         self._dirty = True
         self.status.showMessage('已恢复：' + label, 2500)
 
-    def _load_project_data(self, data):
+    def _load_project_data(self, data, prefer_id=None, prefer_first=False):
         from core.model import Project as PJ
         self.project = PJ.from_dict(data)
-        # 保留当前选中分部（按 id 找回）
-        sid = getattr(self.current_section, 'id', None)
+        # 保留当前选中分部（按 id 找回）；
+        # 当前节点在旧快照里不存在时，退回 prefer_id（改动前选中的节点），
+        # 免得撤销一次就跳到根目录。
+        # prefer_first=True 时优先用 prefer_id（“恢复”操作用：回到改动后的节点）。
+        sid = self._current_sel_id()
         found = self.find_section(sid) if sid else None
+        if prefer_id:
+            alt = self.find_section(prefer_id)
+            if alt is not None and (prefer_first or found is None):
+                found = alt
         self.current_section = found or self.project.root
         self.refresh_tree()
         if found:
@@ -8302,21 +8445,27 @@ class MainWindow(QMainWindow):
         self._insert_level_section(sec, at_end=True)
 
     def duplicate_section(self, *args):
-        """用分部打新：以当前节点为模板复制一份（内容含下级与数据行）。"""
-        sec = self._tree_section()
+        """用分部打新：以当前节点为模板复制一份（内容含下级与数据行）。
+
+        树里没选中节点时，退回到“表格当前所在的节点”，保证工具栏按钮随时可用；
+        打新后自动切到新节点并把表格滚回第一行，让结果直接出现在表格里。
+        """
+        sec = self._tree_section() or getattr(self, 'current_section', None)
         if sec is None:
+            self.status.showMessage('请先在项目结构里选中要打新的节点', 3000)
+            return
+        is_book = self.project.is_book(sec)
+        if not is_book and sec.parent is None:
+            self.status.showMessage('该节点没有上级，无法打新', 3000)
             return
         new = self._clone_section(sec)
         self.push_undo('用分部打新')
-        if self.project.is_book(sec):
+        if is_book:
             new.parent = None
             new.name = self._unique_book_name(new.name)
             self.project.books.append(new)
         else:
             parent = sec.parent
-            if parent is None:
-                self.status.showMessage('该节点没有上级，无法打新', 3000)
-                return
             new.parent = parent
             new.name = self._unique_child_name(parent, new.name)
             try:
@@ -8327,8 +8476,16 @@ class MainWindow(QMainWindow):
         self.project.recalc()
         self.refresh_tree()
         self.select_section(new)
+        try:
+            self.table.scrollToTop()
+        except Exception:
+            pass
         self._dirty = True
-        self.status.showMessage('已按「%s」打新：%s' % (sec.name, new.name), 3000)
+        n_rows = len(getattr(new, 'rows', []) or [])
+        n_kids = len(getattr(new, 'children', []) or [])
+        self.status.showMessage(
+            '已按「%s」打新为「%s」：%d 条计算式、%d 个下级节点，表格已切到新节点'
+            % (sec.name, new.name, n_rows, n_kids), 6000)
 
     def insert_annotation_label(self, *args):
         """注释标签：往当前行的备注里插入一个注释标记。"""
