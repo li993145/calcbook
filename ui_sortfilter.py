@@ -9,7 +9,8 @@ import re
 
 from PyQt5.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel,
                              QComboBox, QLineEdit, QSpinBox, QCheckBox,
-                             QRadioButton, QButtonGroup, QDialogButtonBox)
+                             QRadioButton, QButtonGroup, QDialogButtonBox,
+                             QPushButton)
 
 # ---------------- 拖动填充（自动序号） ----------------
 
@@ -332,6 +333,18 @@ class FilterDialog:
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         bb.accepted.connect(dlg.accept)
         bb.rejected.connect(dlg.reject)
+        # V3.4.1：筛选窗口内直接“清除筛选”，不用退回右键菜单找入口。
+        # 从父窗口 _filter 判断当前是否正在筛选，不新增函数签名（兼容旧调用）。
+        btn_clear = QPushButton('清除筛选')
+        btn_clear.setEnabled(bool(getattr(parent, '_filter', None)))
+        btn_clear.setToolTip('取消当前筛选条件，恢复显示全部行')
+
+        def _do_clear():
+            dlg.setProperty('clearFilter', True)
+            dlg.accept()
+
+        btn_clear.clicked.connect(_do_clear)
+        bb.addButton(btn_clear, QDialogButtonBox.ActionRole)
         v.addWidget(bb)
 
         def sync(i):
@@ -346,6 +359,8 @@ class FilterDialog:
 
         if dlg.exec_() != QDialog.Accepted:
             return None
+        if dlg.property('clearFilter'):
+            return {'clear': True}
         return {
             'col': cb_col.currentIndex(),
             'mode': cb_mode.currentText(),
