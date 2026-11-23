@@ -18,6 +18,7 @@ args = [
     f'--workpath={os.path.join(here, "build")}',
     f'--specpath={os.path.join(here, "build")}',
     f'--add-data={os.path.join(here, "core")}{os.pathsep}core',
+    f'--add-data={os.path.join(here, "assets")}{os.pathsep}assets',
     f'--add-data={icon}{os.pathsep}.',
     '--hidden-import=openpyxl',
     '--hidden-import=PyQt5.QtCore',

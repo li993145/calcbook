@@ -18,9 +18,9 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtCore import (Qt, QSettings, QMimeData, QEvent, QTimer, QUrl, QRectF, QPointF,
                           QPoint, QSizeF, QRect, pyqtSignal, QObject, QItemSelectionModel,
                           QItemSelection, QByteArray)
-from PyQt5.QtGui import (QFont, QFontMetrics, QColor, QKeySequence, QIcon, QTextCursor,
-                         QDesktopServices, QPixmap, QPainter, QPen, QBrush, QPalette,
-                         QCursor)
+from PyQt5.QtGui import (QFont, QFontMetrics, QFontDatabase, QColor, QKeySequence,
+                         QIcon, QTextCursor, QDesktopServices, QPixmap, QPainter,
+                         QPen, QBrush, QPalette, QCursor)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
@@ -36,8 +36,10 @@ from core.highlighter import FormulaHighlighter, compute_runs, FCOLOR
 APP_NAME = "工程量计算书"
 # 本表内部复制/剪切的结构化剪贴板格式（多行整行复制 → 粘到任意位置插入行，不覆盖已有数据）
 CB_ROWS_MIME = 'application/x-calcbook-rows'
-APP_VER = "3.6.0"
+APP_VER = "3.6.1"
 FILE_EXT = '.gcls'          # 工程文件后缀（内容仍是 JSON，便于排查与迁移）
+# V3.6.1：备份默认放到固定目录，不再跟随工程文件所在目录；启动时自动创建。
+DEFAULT_BACKUP_DIR = r'D:\手算工程量计算书\bak'
 
 # ---- 工程文件关联（让资源管理器把 .gcls 显示成软件图标）----
 ASSOC_PROGID = 'CalcBook.Project'
@@ -313,15 +315,76 @@ def fmt_num(v, prec=3):
 
 
 # ===== 工程符号 =====
-# 钢筋等级按建筑行业习惯写法：一级 Φ（HPB300，圆圈+竖线），
-# 二级/三级/四级在 Φ 右上角标 2/3/4（Φ²、Φ³、Φ⁴），
-# 图纸原符号是圆圈+竖线、按等级在下方加 1/2/3 条横线（面板里用图形显示）。
-REBAR_GRADES = [
-    ('Φ', '一级钢 HPB300（圆圈加一竖）', 1),
-    ('Φ²', '二级钢 HRB335（Φ 右上角 2，图形为一竖下加一横）', 2),
-    ('Φ³', '三级钢 HRB400（Φ 右上角 3，图形为一竖下加两横）', 3),
-    ('Φ⁴', '四级钢 HRB500（Φ 右上角 4，图形为一竖下加三横）', 4),
+# V3.6.1：钢筋等级符号改用 TssdEng（探索者）字体里的国标制图符号。
+# TssdEng 把四级钢筋符号放在 Windows 私用区（EUDC）：
+#   U+E000 一级 HPB300（光圆，圆圈+竖线）
+#   U+E001 二级 HRB335（下加一横）
+#   U+E002 三级 HRB400（圈内双竖、下加一横）
+#   U+E003 四级 HRB500（圈内双竖、上下加横）
+# 原来面板里手绘的「圆圈+竖线+N 条横线」不是正规工程符号，已删除；
+# 若本机找不到 tssdeng 字体，特殊符号面板会整组隐藏钢筋符号。
+TSSD_REBAR_CHARS = [
+    ('\ue000', '一级钢 HPB300（光圆钢筋，TssdEng 标准符号）', 1, '一级'),
+    ('\ue001', '二级钢 HRB335（TssdEng 标准符号）', 2, '二级'),
+    ('\ue002', '三级钢 HRB400（TssdEng 标准符号）', 3, '三级'),
+    ('\ue003', '四级钢 HRB500（TssdEng 标准符号）', 4, '四级'),
 ]
+# 这些私用区字符在公式里当规格说明忽略（见 core/formula.py）
+TSSD_REBAR_PUA = ''.join(c for c, _, _, _ in TSSD_REBAR_CHARS)
+_TSSD_FONT_FAMILY = None     # None=未检测；''=检测过但本机没有；str=可用家族名
+
+
+def tssd_font_family():
+    """返回可显示 TssdEng 钢筋符号的 QFont 家族名；本机没有则返回 None。"""
+    global _TSSD_FONT_FAMILY
+    if _TSSD_FONT_FAMILY is not None:
+        return _TSSD_FONT_FAMILY or None
+    base = getattr(sys, '_MEIPASS', HERE)
+    candidates = [os.path.join(base, 'assets', 'TssdEng.ttf'),
+                  os.path.join(HERE, 'assets', 'TssdEng.ttf')]
+    windir = os.environ.get('WINDIR') or r'C:\Windows'
+    for n in ('TssdEng.tte', 'TssdEng.ttf', 'tssdeng.ttf'):
+        candidates.append(os.path.join(windir, 'Fonts', n))
+    for p in candidates:
+        if not os.path.isfile(p):
+            continue
+        try:
+            src = p
+            if p.lower().endswith('.tte'):
+                # Qt 按扩展名识别字体，复制成 .ttf 再加载
+                src = os.path.join(tempfile.gettempdir(), 'calcbook_tssdeng.ttf')
+                shutil.copyfile(p, src)
+            fid = QFontDatabase.addApplicationFont(src)
+            if fid >= 0:
+                fams = QFontDatabase.applicationFontFamilies(fid)
+                if fams:
+                    _TSSD_FONT_FAMILY = fams[0]
+                    return _TSSD_FONT_FAMILY
+        except Exception:
+            continue
+    # 系统已注册 EUDC / TssdEng 家族时，默认字体回退也能显示这些私用区字符
+    for fam in QFontDatabase().families():
+        if 'eudc' in fam.lower() or 'tssd' in fam.lower():
+            _TSSD_FONT_FAMILY = fam
+            return fam
+    _TSSD_FONT_FAMILY = ''
+    return None
+
+
+def tssd_rebar_pixmap(ch, family, size=32, color='#1f3864'):
+    """把 TssdEng 字体的钢筋符号画成图标，供特殊符号面板按钮使用。"""
+    pm = QPixmap(size, size)
+    pm.fill(Qt.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.Antialiasing)
+    f = QFont(family)
+    f.setPixelSize(int(size * 0.78))
+    p.setFont(f)
+    p.setPen(QColor(color))
+    p.drawText(QRectF(0, 0, size, size), Qt.AlignCenter, ch)
+    p.end()
+    return pm
+
 
 ENG_SYMBOLS = [
     ('×', '乘号'), ('÷', '除号'), ('π', '圆周率 3.14159'), ('²', '平方'),
@@ -331,27 +394,6 @@ ENG_SYMBOLS = [
     ('√', '开平方：√9、√(3+4) 可直接计算'),
     ('D', '直径 D'), ('R', '半径 R'),
 ]
-
-
-def rebar_pixmap(level, size=28, color='#1f3864'):
-    """画钢筋等级符号：圆圈 + 竖线，等级 2/3/4 在下方依次加 1/2/3 条横线。"""
-    pm = QPixmap(size, size)
-    pm.fill(Qt.transparent)
-    p = QPainter(pm)
-    p.setRenderHint(QPainter.Antialiasing)
-    pen = QPen(QColor(color))
-    pen.setWidthF(max(1.2, size / 15.0))
-    p.setPen(pen)
-    d = size * 0.46
-    rect = QRectF((size - d) / 2.0, size * 0.06, d, d)
-    p.drawEllipse(rect)
-    p.drawLine(QPointF(size / 2.0, rect.top()), QPointF(size / 2.0, rect.bottom()))
-    n = max(0, level - 1)
-    for i in range(n):
-        y = rect.bottom() + size * 0.09 + i * size * 0.115
-        p.drawLine(QPointF(size * 0.24, y), QPointF(size * 0.76, y))
-    p.end()
-    return pm
 
 
 from PyQt5.QtCore import pyqtSignal
@@ -2200,23 +2242,25 @@ class SymbolPicker(QDialog):
             g1.addWidget(b, i // 9, i % 9)
         lay.addLayout(g1)
 
-        # —— 钢筋等级（图形显示标准符号，插入行业通用写法）——
-        title('钢筋等级（图形为标准图纸符号，插入 Φ、Φ²、Φ³、Φ⁴）')
-        g2 = QHBoxLayout()
-        g2.setContentsMargins(0, 0, 0, 0)
-        g2.setSpacing(3)
-        for ch, tip, level in REBAR_GRADES:
-            b = QToolButton()
-            b.setText({1: '一级', 2: '二级', 3: '三级', 4: '四级'}[level])
-            b.setToolTip(tip)
-            b.setIcon(QIcon(rebar_pixmap(level, 30)))
-            b.setIconSize(QSizeF(30, 30).toSize())
-            b.setToolButtonStyle(Qt.ToolButtonTextUnderIcon)
-            b.setFixedSize(56, 62)
-            b.clicked.connect(lambda checked=False, c=ch: self.insert_cb(c))
-            g2.addWidget(b)
-        g2.addStretch(1)
-        lay.addLayout(g2)
+        # —— 钢筋等级：TssdEng 字体里的国标制图符号（找不到字体时整组隐藏）——
+        fam = tssd_font_family()
+        if fam:
+            title('钢筋等级（TssdEng 标准制图符号，点击插入公式）')
+            g2 = QHBoxLayout()
+            g2.setContentsMargins(0, 0, 0, 0)
+            g2.setSpacing(3)
+            for ch, tip, level, label in TSSD_REBAR_CHARS:
+                b = QToolButton()
+                b.setText(label)
+                b.setToolTip(tip)
+                b.setIcon(QIcon(tssd_rebar_pixmap(ch, fam, 34)))
+                b.setIconSize(QSizeF(34, 34).toSize())
+                b.setToolButtonStyle(Qt.ToolButtonTextUnderIcon)
+                b.setFixedSize(56, 62)
+                b.clicked.connect(lambda checked=False, c=ch: self.insert_cb(c))
+                g2.addWidget(b)
+            g2.addStretch(1)
+            lay.addLayout(g2)
 
         row = QHBoxLayout()
         row.addWidget(QLabel('插入位置：公式辅助框光标处，或当前单元格文本末尾'))
@@ -2670,7 +2714,16 @@ class MainWindow(QMainWindow):
         # 自动保存设置
         self.autosave_enabled = self.settings.value('autosave_enabled', False, type=bool)
         self.autosave_min = int(self.settings.value('autosave_min', 5))
-        self.autosave_dir = self.settings.value('autosave_dir', '')
+        # V3.6.1：备份默认放到固定目录 D:\手算工程量计算书\bak，不再跟随工程文件目录。
+        # 老设置里存的是工程目录（或空）时，用一次性标记迁移到默认目录；
+        # 之后用户在「选项配置」里手动指定的目录原样保留。
+        if self.settings.value('backup_dir_v361', '', type=str) != '1':
+            self.autosave_dir = DEFAULT_BACKUP_DIR
+            self.settings.setValue('autosave_dir', self.autosave_dir)
+            self.settings.setValue('backup_dir_v361', '1')
+        else:
+            self.autosave_dir = (self.settings.value('autosave_dir', DEFAULT_BACKUP_DIR, type=str)
+                                 or DEFAULT_BACKUP_DIR)
         self._dirty = False
         # 行高默认自适应；V3.6.0 起列宽默认使用列定义里的固定宽度，
         # 新增列/刷新表格不会再把用户调好的列宽全部打乱。
@@ -4000,7 +4053,7 @@ class MainWindow(QMainWindow):
         <li><b>撤销 / 恢复、查找</b>：Ctrl+Z 撤销、Ctrl+Y 恢复，逐字输入公式只算一步；Ctrl+F 打开查找，可按编号 / 项目名称 / 单位 / 部位 / 计算公式 / 备注或「全部字段」搜索，回车逐个定位到对应行。</li>
         <li><b>排序 / 筛选</b>：右键或工具栏「计算书编辑」可排序、筛选——先在窗口里选<b>筛选列</b>（选哪列就筛哪列，V3.5 修复）再选条件（等于 / 包含 / 数字比较 / 正则 / 按填充颜色等），只隐藏不删数据、刷新后保持、编辑数据后立即重算；比较时自动统一全 / 半角与空格（V3.6），例如 <code>Ａ－００１</code> 可用 <code>A-001</code> 筛到；内容留空或正则写错会明确提示。<b>取消筛选</b>有三个入口：筛选窗口内点「清除筛选」、工具栏「清除筛选」、右键「清除筛选」，点后立即恢复显示全部行。</li>
         <li><b>选区统计与缩放</b>：单选 / 多选「工程量」列的数据，状态栏右下角实时显示 <code>求和=… 平均值=… 计数=…</code>（WPS 式，取代原来的固定小计）；多选 / 全选后普通左键点某格会恢复为只选这一格（V3.6），统计只算真正选中的格子。在表格上按住 <b>Ctrl + 鼠标滚轮</b> 可放大 / 缩小单元格显示（字号与手动行高列宽同比例，6–24 号字），不按 Ctrl 时滚轮照常滚动。</li>
-        <li><b>默认列与列宽（V3.6）</b>：默认列顺序为 序号 / 编号 / 项目名称 / 单位 / 工程量 / 计算公式 / 图纸编号 / 大样图来源 / 不计 / 备注，宽度依次 80 / 135 / 340 / 80 / 100 / 600 / 150 / 150 / 80 / 200。列宽默认固定，新增列或刷新表格不会打乱已调好的宽度；表头右键可增删 / 重命名列、设置列宽（工具栏「数据列定义」按钮已取消）。</li>
+        <li><b>默认列与列宽（V3.6）</b>：默认列顺序为 序号 / 编号 / 项目名称 / 单位 / 工程量 / 计算公式 / 图纸编号 / 大样图来源 / 不计 / 备注，宽度依次 80 / 135 / 340 / 80 / 100 / 600 / 150 / 150 / 80 / 200。列宽默认固定，新增列或刷新表格不会打乱已调好的宽度；表头右键可增删 / 重命名列、设置列宽（工具栏「数据列定义」按钮已取消）。<b>序号 / 编号 / 单位 / 工程量以及新增列默认居中对齐</b>，仍可右键单独改对齐。</li>
         </ul>
 
         <h3 style="color:#2f5597;">五、公式与函数</h3>
@@ -4010,7 +4063,7 @@ class MainWindow(QMainWindow):
         <li><b>常量</b>：@加名称，如 <code>@层高=3.6</code>。左下常量框为「常量代码 / 值 / 说明」三列，双击即可修改，不写 @ 会自动补上。常量全部自定义；需要钢筋单重时点「▾」→「插入常用钢筋单重（14 条模板）」，插入后可随意改删。公式里写 <code>@层高×4</code>、<code>@Φ8×12</code> 即可参与计算；引用未定义的常量，该行红色提示“未定义的常量：@xxx”。</li>
         <li><b>函数</b>：ceil 向上取整、floor 向下取整、sqr 平方、sqrt 开平方、round 四舍五入、power(x,n) 幂、pi / π 圆周率、radians 角度转弧度、du 弧度转角度、abs 绝对值、max、min、sum、<b>avg 平均值</b>、sin、cos、tan。点「插入函数」弹出函数面板，点函数名即插入 <code>函数名()</code>，光标停在括号内，每个函数都有写法提示。</li>
         <li><b>括号快捷键</b>：F4 公式前插入 <code>()</code>、F5 插入点插入 <code>()</code>、F6 插入点插入 <code>[]</code>、F7 末尾追加 <code>[]</code>；在单元格里直接打字时也生效。</li>
-        <li><b>特殊写法</b>：度分秒如 34°56′30″ 可直接计算；<code>√9=3</code>、<code>√(3+4)</code>、<code>2×√9</code> 均可；钢筋等级一级 Φ、二级 Φ²、三级 Φ³、四级 Φ⁴（按行业习惯在 Φ 右上角标级别），写在公式开头作规格说明时不参与计算，如 <code>Φ³8@200 4×5</code>=20。点「特殊符号」可看图选符号。</li>
+        <li><b>特殊写法</b>：度分秒如 34°56′30″ 可直接计算；<code>√9=3</code>、<code>√(3+4)</code>、<code>2×√9</code> 均可；写在公式开头的钢筋规格（如 <code>Φ8@200 4×5</code>=20）不参与计算，旧写法 Φ² / Φ³ / Φ⁴ 仍兼容。<b>钢筋等级符号</b>请点「特殊符号」：面板里用 <b>TssdEng（探索者）字体的国标制图符号</b>（一级 HPB300 / 二级 HRB335 / 三级 HRB400 / 四级 HRB500），点击即插入公式；这些符号需 TssdEng 字体显示（软件已随包附带），本机没有该字体时该组会自动隐藏。</li>
         <li><b>汇总与配色</b>：每个分部自动「小计」（XJ 子分部汇总函数已取消，旧工程中的 XJ() 公式仍可正常计算）。公式列与辅助框用同一套配色：数字红、运算符黑、<code>[备注]</code>深绿、汉字淡绿、@常量紫、上标蓝，便于核对。</li>
         </ul>
 
@@ -4031,7 +4084,7 @@ class MainWindow(QMainWindow):
 
         <h3 style="color:#2f5597;">八、其他功能与快捷键</h3>
         <ul>
-        <li><b>自动保存与备份</b>：「计算书」组「选项配置」里可设自动保存开关、间隔（1–120 分钟）和备份目录；到点时若工程有改动会写回主文件，并在备份目录生成带时间戳的副本。</li>
+        <li><b>自动保存与备份</b>：「计算书」组「选项配置」里可设自动保存开关、间隔（1–120 分钟）和备份目录；<b>默认备份目录为 <code>D:\手算工程量计算书\bak</code></b>（不再跟随工程文件目录），软件启动时会检查并自动创建该文件夹，创建失败会提示你手动指定；到点时若工程有改动会写回主文件，并在备份目录生成带时间戳的副本。</li>
         <li><b>工程文件</b>：保存为 <code>.gcls</code>（内容仍是 JSON 文本，便于排查），包含所有计算书、分部结构、公式、备注、常量、列定义、填充色与页面设置；旧版 .json 工程也能打开。<b>软件启动不再自动打开上次的工程</b>（每次都是空白工程，保护隐私、避免误改），需要时请用「打开」或从「最近打开」选择；双击 <code>.gcls</code> 文件仍可直接打开对应工程。</li>
         <li><b>常用快捷键</b>：Ctrl+N 新建、Ctrl+O 打开、Ctrl+S 保存、Ctrl+P 打印、Ctrl+F 查找、Ctrl+C / X / V 复制 / 剪切 / 粘贴（整行复制粘贴时插入行、不覆盖数据）、Delete 清除单元格内容、Insert 插入行、末行回车自动加行、Ctrl+Z / Ctrl+Y 撤销 / 恢复、F4–F7 插入括号、Ctrl+Enter 确认公式。</li>
         <li><b>行 / 列高亮</b>：表格上方快捷操作行的「选中行高亮」「选中列高亮」两个开关——当前行、当前列加同色淡蓝底纹，可同时开（交叉处稍深）；只加底纹，不影响框选、删除与粘贴。</li>
@@ -4189,8 +4242,10 @@ class MainWindow(QMainWindow):
                         it.setTextAlignment(Qt.AlignCenter | Qt.AlignVCenter)
                     else:
                         it = QTableWidgetItem(val)
-                        # V3.4：编号 / 单位 / 工程量 三列默认居中对齐（粘贴后重绘同样生效）
-                        if key in ('code', 'unit', 'value'):
+                        # V3.4：编号 / 单位 / 工程量 默认居中；V3.6.1 起序号列、以及
+                        # 新增的自定义列（列定义 align=center）也默认居中对齐。
+                        # 用户手动设置的 row.cell_align 在 _apply_item_align 里优先覆盖。
+                        if key in ('seq', 'code', 'unit', 'value') or cd.get('align') == 'center':
                             it.setTextAlignment(Qt.AlignCenter | Qt.AlignVCenter)
                         if row.error and key in ('formula', 'value'):
                             it.setForeground(QColor('C00000'))
@@ -4205,7 +4260,7 @@ class MainWindow(QMainWindow):
                     if key == 'no_count':
                         it.setFlags(Qt.ItemIsEnabled | Qt.ItemIsUserCheckable | Qt.ItemIsSelectable)
                         it.setCheckState(Qt.Unchecked)
-                    elif key in ('code', 'unit', 'value'):
+                    elif key in ('seq', 'code', 'unit', 'value') or cd.get('align') == 'center':
                         it.setTextAlignment(Qt.AlignCenter | Qt.AlignVCenter)
                     if cd.get('fill'):
                         it.setBackground(QBrush(QColor(cd['fill'])))
@@ -5757,7 +5812,9 @@ class MainWindow(QMainWindow):
         name = name.strip()
         key = 'c_' + uuid.uuid4().hex[:8]
         self.push_undo('添加列')
-        self.project.columns.insert(index, {'key': key, 'title': name, 'width': 120, 'builtin': False})
+        # V3.6.1：新增的自定义列默认文本居中对齐（用户仍可右键改对齐）
+        self.project.columns.insert(index, {'key': key, 'title': name, 'width': 120,
+                                            'builtin': False, 'align': 'center'})
         self.refresh_table()
         self._dirty = True
         self.status.showMessage(f'已添加列「{name}」', 3000)
@@ -6853,7 +6910,8 @@ class MainWindow(QMainWindow):
             name, ok = QInputDialog.getText(self, '新增列', '列名称：', QLineEdit.Normal, '新列')
             if ok and name.strip():
                 key = 'c_' + uuid.uuid4().hex[:8]
-                self.project.columns.append({'key': key, 'title': name.strip(), 'width': 120, 'builtin': False})
+                self.project.columns.append({'key': key, 'title': name.strip(), 'width': 120,
+                                             'builtin': False, 'align': 'center'})
                 it = QListWidgetItem(f"{name.strip()}    宽度：120")
                 it.setData(Qt.UserRole, key)
                 it.setFlags(it.flags() | Qt.ItemIsEditable)
@@ -7553,7 +7611,25 @@ class MainWindow(QMainWindow):
         self.update_constants_display()
 
     # ---------------- 自动保存 ----------------
+    def ensure_backup_dir(self):
+        """V3.6.1：确保备份目录存在——打开软件时自动创建；无法创建时提示用户手动指定。"""
+        d = (self.autosave_dir or '').strip()
+        if not d:
+            return False
+        try:
+            os.makedirs(d, exist_ok=True)
+            return True
+        except Exception as e:
+            msg = '备份目录无法自动创建：%s（%s），请在「选项配置」里手动指定' % (d, e)
+            try:
+                QTimer.singleShot(0, lambda m=msg: self.status.showMessage(m, 8000))
+            except Exception:
+                pass
+            return False
+
     def reset_autosave_timer(self):
+        # 启动 / 改设置时都顺手确保默认备份目录已经建好
+        self.ensure_backup_dir()
         # 主文件已保存 或 设置了备份目录，均可启用自动保存
         if self.autosave_enabled and (self.current_file or self.autosave_dir):
             self.autosave_timer.start(max(1, self.autosave_min) * 60 * 1000)
@@ -7572,7 +7648,7 @@ class MainWindow(QMainWindow):
         except Exception as e:
             self.status.showMessage('自动保存主文件失败：%s' % e, 4000)
         # 备份目录：另存带时间戳副本，防止主文件被覆盖后无法回溯
-        if self.autosave_dir and os.path.isdir(self.autosave_dir):
+        if self.autosave_dir and self.ensure_backup_dir():
             try:
                 base = self.project.name or '工程'
                 bpath = os.path.join(self.autosave_dir, f'{base}-自动备份-{now}{FILE_EXT}')
@@ -7604,7 +7680,7 @@ class MainWindow(QMainWindow):
         # 备份目录
         dir_row = QHBoxLayout()
         self.ed_autosave_dir = QLineEdit(self.autosave_dir)
-        self.ed_autosave_dir.setPlaceholderText('留空则只覆盖主文件')
+        self.ed_autosave_dir.setPlaceholderText('留空则只覆盖主文件；默认 ' + DEFAULT_BACKUP_DIR)
         btn_browse = QPushButton('浏览…')
         def browse():
             d = QFileDialog.getExistingDirectory(dlg, '选择自动保存目录',
@@ -7615,8 +7691,9 @@ class MainWindow(QMainWindow):
         dir_row.addWidget(self.ed_autosave_dir, 1)
         dir_row.addWidget(btn_browse)
         form.addRow('备份目录：', dir_row)
-        lbl = QLabel('说明：到点时若工程有改动，自动写回主文件；若指定了备份目录，'
-                     '会同时在该目录生成带时间戳的备份副本，便于回溯。')
+        lbl = QLabel('说明：默认备份目录为 %s（软件启动会自动创建），不再跟随工程文件所在目录；'
+                     '到点时若工程有改动，自动写回主文件并在备份目录生成带时间戳的副本。'
+                     % DEFAULT_BACKUP_DIR)
         lbl.setWordWrap(True)
         lbl.setStyleSheet('color:#666;')
         form.addRow(lbl)
