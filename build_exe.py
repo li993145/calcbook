@@ -19,14 +19,13 @@ args = [
     f'--specpath={os.path.join(here, "build")}',
     f'--add-data={os.path.join(here, "core")}{os.pathsep}core',
     f'--add-data={icon}{os.pathsep}.',
-]
-if os.path.exists(file_icon):
-    args.append(f'--add-data={file_icon}{os.pathsep}.')
     '--hidden-import=openpyxl',
     '--hidden-import=PyQt5.QtCore',
     '--hidden-import=PyQt5.QtGui',
     '--hidden-import=PyQt5.QtWidgets',
 ]
+if os.path.exists(file_icon):
+    args.append(f'--add-data={file_icon}{os.pathsep}.')
 if os.path.exists(icon):
     args.append(f'--icon={icon}')
 PyInstaller.__main__.run(args)
