@@ -36,7 +36,7 @@ from core.highlighter import FormulaHighlighter, compute_runs, FCOLOR
 APP_NAME = "工程量计算书"
 # 本表内部复制/剪切的结构化剪贴板格式（多行整行复制 → 粘到任意位置插入行，不覆盖已有数据）
 CB_ROWS_MIME = 'application/x-calcbook-rows'
-APP_VER = "3.3.0"
+APP_VER = "3.4.0"
 FILE_EXT = '.gcls'          # 工程文件后缀（内容仍是 JSON，便于排查与迁移）
 
 # ---- 工程文件关联（让资源管理器把 .gcls 显示成软件图标）----
@@ -2701,14 +2701,22 @@ class MainWindow(QMainWindow):
             register_file_assoc()
         self.build_ui()
         self._apply_table_font(refit=False)   # 恢复上次设置的表格字体
-        # 启动时恢复上次打开的工程（工程名直接显示在标题栏）
-        # 测试/调试时可设 CALCBOOK_NO_RESTORE=1 跳过，避免读到用户上次的工程
+        # V3.4：不再默认打开用户上次工程（隐私 + 防止正在编辑时更新程序导致丢数据）。
+        # 每次启动都显示全新空白工程；只有显式设置 CALCBOOK_RESTORE=1 才恢复
+        # （双击 .gcls 文件打开由 main() 的命令行参数单独处理，不受此影响）。
         restored = False
-        if not os.environ.get('CALCBOOK_NO_RESTORE'):
+        if os.environ.get('CALCBOOK_RESTORE') == '1':
             restored = self.restore_last_project()
         if not restored:
             self.refresh_tree()
             self.refresh_table()
+        # 避免把上次工程路径留在配置里：默认清空自动恢复目标（最近打开列表另存）
+        if self.last_file and os.environ.get('CALCBOOK_RESTORE') != '1':
+            self.last_file = ''
+            try:
+                self.settings.remove('last_file')
+            except Exception:
+                pass
         self.update_recent_menu()
         # 诊断开关（发版时用 set CALCBOOK_DUMP=1 启动，会把面板几何写到 dump 文件）
         if os.environ.get('CALCBOOK_DUMP'):
@@ -3068,8 +3076,18 @@ class MainWindow(QMainWindow):
         cv.setSpacing(0)
 
         # ===== 最上面一条：自绘标题栏 =====
-        # 左：软件图标 + 软件名版本 | 工程文件名称 | [文件位置]；右：窗口按钮
-        self.title_strip = TitleStrip(parent=self,
+        # 左：常用函数快捷按钮 + 软件图标 + 软件名版本 | 工程文件名称 | [文件位置]；右：窗口按钮
+        # V3.4：取消“公式编辑”页签后，π / 插入函数 / round / 取整 放这里（WPS 式快捷键）
+        quick_funcs = [
+            ('π 圆周率  (插入公式)', 'π', lambda: self.insert_symbol('π')),
+            ('插入函数…  (全部内置函数)', 'ƒ', self.show_function_picker),
+            ('round 四舍五入  (插入公式)', 'R', lambda: self.insert_function('round()', 1)),
+            ('ceil 向上取整  (插入公式)', '↑', lambda: self.insert_function('ceil()', 1)),
+            ('floor 向下取整  (插入公式)', '↓', lambda: self.insert_function('floor()', 1)),
+            ('sin 正弦  (插入公式)', 'S', lambda: self.insert_function('sin()', 1)),
+            ('cos 余弦  (插入公式)', 'C', lambda: self.insert_function('cos()', 1)),
+        ]
+        self.title_strip = TitleStrip(quick_funcs, parent=self,
                                       icon_path=getattr(self, 'app_icon_path', ''))
         try:
             self.title_strip.minimizeRequested.connect(self._win_minimize)
@@ -3124,27 +3142,6 @@ class MainWindow(QMainWindow):
                     ('筛选', 'settings', self.filter_dialog, '', False),
                     ('数据列定义', 'settings', self.column_setup, '', False),
                     ('选项配置', 'settings', self.autosave_settings, '', False),
-                ]),
-            ],
-            '公式编辑': [
-                ('公式', [
-                    ('插入函数', 'settings', self.show_functions, '', True),
-                ]),
-                ('常用函数', [
-                    ('π', 'π', lambda: self.insert_symbol('π'), '', False),
-                    ('sin', 'S', lambda: self.insert_function('sin()', 1), '', False),
-                    ('cos', 'C', lambda: self.insert_function('cos()', 1), '', False),
-                    ('四舍五入', 'R', lambda: self.insert_function('round()', 1), '', False),
-                    ('向上取整', '↑', lambda: self.insert_function('ceil()', 1), '', False),
-                    ('向下取整', '↓', lambda: self.insert_function('floor()', 1), '', False),
-                    ('平方', 'x²', lambda: self.insert_function('sqr()', 1), '', False),
-                    ('立方', 'x³', lambda: self.insert_function('power(,3)', 3), '', False),
-                ]),
-                ('括号符号', [
-                    ('F4 前置()', '( )', lambda: self.insert_bracket('pre'), '', False),
-                    ('F5 插入()', '( )', lambda: self.insert_bracket('cur'), '', False),
-                    ('F6 插入[]', '[ ]', lambda: self.insert_bracket('cur_sq'), '', False),
-                    ('F7 末尾[]', '[ ]', lambda: self.insert_bracket('end_sq'), '', False),
                 ]),
             ],
             '数据输出': [
@@ -3899,9 +3896,9 @@ class MainWindow(QMainWindow):
 
         <h3 style="color:#2f5597;">二、界面布局与标题栏</h3>
         <ul>
-        <li>最上面是自绘标题栏：左端直接显示 软件图标 → 软件名与版本 → 工程文件名称 → <code>[文件存放详细地址]</code>，不再有新建 / 打开 / 保存 / 打印小按钮；最右端是最小化 / 最大化 / 关闭。未保存的工程显示 <code>[未保存]</code>。</li>
+        <li>最上面是自绘标题栏：左端是一排<b>常用函数快捷按钮</b>（π 圆周率、插入函数、round 四舍五入、向上 / 向下取整、sin、cos），点击即可把函数插入当前公式；紧跟着显示 软件图标 → 软件名与版本 → 工程文件名称 → <code>[文件存放详细地址]</code>；最右端是最小化 / 最大化 / 关闭。未保存的工程显示 <code>[未保存]</code>。</li>
         <li>标题栏空白处按住可拖动窗口，双击最大化 / 还原；鼠标移到窗口边缘可拖拽调整大小。路径过长时中间省略，鼠标悬停可看全路径。</li>
-        <li>Ribbon 四个页签：<b>计算书编辑</b>（文件、编辑、格式、计算书等）、<b>公式编辑</b>（插入函数、常用函数：π / sin / cos / 四舍五入 / 向上取整 / 向下取整 / 平方 / 立方、括号符号）、<b>数据输出</b>（导出、打印、打印预览、页面设置）、<b>关于产品</b>（使用说明、关于产品）。「查看公式」「重算」按钮已取消。</li>
+        <li>Ribbon 三个页签：<b>计算书编辑</b>（文件、编辑、格式、计算书等）、<b>数据输出</b>（导出、打印、打印预览、页面设置）、<b>关于产品</b>（使用说明、关于产品）。<b>「公式编辑」页签已取消</b>，所有内置函数改由标题栏快捷按钮与「插入函数」面板调用；「查看公式」「重算」按钮也已取消；F4–F7 插入括号的快捷键仍可用。</li>
         <li>左侧为项目结构树与常量框，中间为公式辅助框、快捷操作行和工作区表格，右侧为分类汇总面板。各面板分割条上有小箭头按钮可收起 / 展开（宽度会被记住）；汇总标题行的「⤢」可隐藏主工作区、放大查看汇总，再点「⤡」还原。</li>
         </ul>
 
@@ -3916,7 +3913,7 @@ class MainWindow(QMainWindow):
         <ul>
         <li><b>公式辅助框</b>：只在「计算公式」列生效。选中公式列单元格时公式同步显示在上方辅助框并着色；在表格里逐字输入会立即同步到辅助框，在辅助框输入也会实时更新到单元格和工程量。按 Ctrl+Enter 确认。</li>
         <li><b>单位与小数位</b>：单位列是下拉框（可滚动选择，也可直接输入自定义单位），内置 m、m2、m3、kg、t、个、块、套、处、台、组、根、樘、座、件、项、台班、延长米、千块等。工程量小数位按单位自动决定：m / m2 / m3 / kg 保留 2 位，t 保留 3 位，个 / 块 / 套 / 处 / 台 / 组 取整，其他单位默认 3 位；表格、打印、Excel 导出口径一致。</li>
-        <li><b>复制 / 剪切 / 粘贴</b>：单击选中即可 Ctrl+C 复制（不必进编辑态），双击 / F2 才编辑。框选区域 Ctrl+C 复制为 TSV，可直接粘到 WPS / Excel；整行（可多选）复制 / 剪切后，Ctrl+V 粘到任意位置会<b>插入行、原有数据顺延，不覆盖</b>；右键「粘贴」同时支持 WPS 表格、外部文件文本和本表复制 / 剪切的数据（含字体、颜色、对齐）；所有操作可 Ctrl+Z 撤销。在最后一行按<b>回车</b>自动追加新行；粘贴超出末尾也会自动加行。</li>
+        <li><b>复制 / 剪切 / 粘贴</b>：单击选中即可 Ctrl+C 复制（不必进编辑态），双击 / F2 才编辑。框选区域 Ctrl+C 复制为 TSV，可直接粘到 WPS / Excel；<b>复制 / 粘贴按表头当前显示顺序读写，拖动列换位后也不会错列</b>。整行（可多选）复制 / 剪切后，Ctrl+V 粘到任意位置会<b>插入行、原有数据顺延，不覆盖</b>；只框选部分单元格再剪切时，<b>仅清空这些单元格，不删除整行</b>；右键「粘贴」同时支持 WPS 表格、外部文件文本和本表复制 / 剪切的数据（含字体、颜色、对齐）；所有操作可 Ctrl+Z 撤销。在最后一行按<b>回车</b>自动追加新行；粘贴超出末尾也会自动加行。</li>
         <li><b>清除内容 / 删除</b>：选中单元格（可多选）后按 <b>Delete</b> 或右键「清除单元格内容」，只清空内容、保留行列结构，可撤销；整行 / 整列选中时按 Delete 才删除整行 / 整列，结构删除也保留在专门的右键菜单里。</li>
         <li><b>右键菜单</b>：单元格右键可插入行、清除内容、设置 / 清除打印区域、调整列宽行高、标记为不计、单元格对齐 / 字体 / 转半角；行号右键可插入 / 删除行、整行上色、本行对齐、冻结至本行；表头右键可添加 / 删除 / 重命名列、整列着色、整列对齐、冻结至本列；左上角角标右键可删除全部数据、行列宽高开关、全表对齐、全选、取消冻结。</li>
         <li><b>填充颜色</b>：选中单元格或整行 / 整列后，点「格式」组「填充颜色」，选颜色和应用范围（整行 / 整列 / 仅选中单元格）。优先级为 单元格 &gt; 整行 &gt; 整列；「清除填充」按当前选择自动判断范围。颜色会带到打印、预览和 Excel。</li>
@@ -3954,7 +3951,7 @@ class MainWindow(QMainWindow):
         <h3 style="color:#2f5597;">八、其他功能与快捷键</h3>
         <ul>
         <li><b>自动保存与备份</b>：「计算书」组「选项配置」里可设自动保存开关、间隔（1–120 分钟）和备份目录；到点时若工程有改动会写回主文件，并在备份目录生成带时间戳的副本。</li>
-        <li><b>工程文件</b>：保存为 <code>.gcls</code>（内容仍是 JSON 文本，便于排查），包含所有计算书、分部结构、公式、备注、常量、列定义、填充色与页面设置；旧版 .json 工程也能打开。软件启动会自动打开上次使用的工程。</li>
+        <li><b>工程文件</b>：保存为 <code>.gcls</code>（内容仍是 JSON 文本，便于排查），包含所有计算书、分部结构、公式、备注、常量、列定义、填充色与页面设置；旧版 .json 工程也能打开。<b>软件启动不再自动打开上次的工程</b>（每次都是空白工程，保护隐私、避免误改），需要时请用「打开」或从「最近打开」选择；双击 <code>.gcls</code> 文件仍可直接打开对应工程。</li>
         <li><b>常用快捷键</b>：Ctrl+N 新建、Ctrl+O 打开、Ctrl+S 保存、Ctrl+P 打印、Ctrl+F 查找、Ctrl+C / X / V 复制 / 剪切 / 粘贴（整行复制粘贴时插入行、不覆盖数据）、Delete 清除单元格内容、Insert 插入行、末行回车自动加行、Ctrl+Z / Ctrl+Y 撤销 / 恢复、F4–F7 插入括号、Ctrl+Enter 确认公式。</li>
         <li><b>行 / 列高亮</b>：表格上方快捷操作行的「选中行高亮」「选中列高亮」两个开关——当前行、当前列加同色淡蓝底纹，可同时开（交叉处稍深）；只加底纹，不影响框选、删除与粘贴。</li>
         <li><b>表格字体</b>：功能区「计算书编辑 → 格式 → 表格字体」，字体类型来自电脑系统字库（宋体、黑体、仿宋、楷体等），字号 6–24；确定后表格行高 / 列宽按新字体自动重排，设置会记住，下次启动自动恢复。</li>
@@ -4114,8 +4111,9 @@ class MainWindow(QMainWindow):
                         it.setTextAlignment(Qt.AlignCenter | Qt.AlignVCenter)
                     else:
                         it = QTableWidgetItem(val)
-                        if key == 'value' and row.value is not None:
-                            it.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                        # V3.4：编号 / 单位 / 工程量 三列默认居中对齐（粘贴后重绘同样生效）
+                        if key in ('code', 'unit', 'value'):
+                            it.setTextAlignment(Qt.AlignCenter | Qt.AlignVCenter)
                         if row.error and key in ('formula', 'value'):
                             it.setForeground(QColor('C00000'))
                             it.setToolTip(row.error)
@@ -4129,6 +4127,8 @@ class MainWindow(QMainWindow):
                     if key == 'no_count':
                         it.setFlags(Qt.ItemIsEnabled | Qt.ItemIsUserCheckable | Qt.ItemIsSelectable)
                         it.setCheckState(Qt.Unchecked)
+                    elif key in ('code', 'unit', 'value'):
+                        it.setTextAlignment(Qt.AlignCenter | Qt.AlignVCenter)
                     if cd.get('fill'):
                         it.setBackground(QBrush(QColor(cd['fill'])))
                 self.table.setItem(i, j, it)
@@ -4165,6 +4165,29 @@ class MainWindow(QMainWindow):
         if 0 <= col < len(cols):
             return cols[col]['key']
         return ''
+
+    def visual_col_order(self):
+        """按表头当前显示（视觉）顺序返回逻辑列索引列表。
+
+        用户拖动表头移动列后，模型逻辑列不变、视觉顺序变化。复制到剪贴板
+        和从剪贴板粘贴必须统一按视觉顺序读写，否则移动列之后会出现错列。
+        """
+        hh = self.table.horizontalHeader()
+        order = []
+        for v in range(self.table.columnCount()):
+            logical = hh.logicalIndex(v)
+            if logical < 0 or hh.isSectionHidden(logical):
+                continue
+            order.append(logical)
+        return order
+
+    def sort_cols_visual(self, col_iter):
+        """把一组逻辑列索引按当前表头视觉顺序排序（去重）。"""
+        hh = self.table.horizontalHeader()
+        def key(c):
+            vi = hh.visualIndex(c) if 0 <= c < self.table.columnCount() else -1
+            return (vi if vi >= 0 else 10 ** 6, c)
+        return sorted(set(col_iter), key=key)
 
     def cell_value(self, row, col):
         item = self.table.item(row, col)
@@ -4462,22 +4485,30 @@ class MainWindow(QMainWindow):
             sec.rows.append(Row())
         added = len(sec.rows) - before_n
         cols = self.project.columns
+        # V3.4：从锚点开始按“表头视觉顺序”落列，移动列后仍贴到用户看到的位置
+        vis_order = self.visual_col_order()
+        try:
+            v_start = vis_order.index(start_col)
+        except ValueError:
+            v_start = 0 if vis_order else start_col
         self._loading = True
         for i, cells in enumerate(rows):
             r = start_row + i
             for j, val in enumerate(cells):
-                c = start_col + j
-                if c < len(cols):
+                v = v_start + j
+                if v >= len(vis_order):
+                    break
+                c = vis_order[v]
+                key = cols[c]['key']
+                if key == 'value':
+                    continue
+                if key == 'no_count':
                     row = sec.rows[r]
-                    key = cols[c]['key']
-                    if key == 'value':
-                        continue
-                    if key == 'no_count':
-                        row.no_count = val.strip() == '是'
-                    elif hasattr(row, key):
-                        setattr(row, key, val.rstrip())
-                    else:
-                        row.custom[key] = val.rstrip()
+                    row.no_count = val.strip() == '是'
+                elif hasattr(sec.rows[r], key):
+                    setattr(sec.rows[r], key, val.rstrip())
+                else:
+                    sec.rows[r].custom[key] = val.rstrip()
         self._loading = False
         self.project.recalc()
         self.refresh_table()
@@ -4976,10 +5007,11 @@ class MainWindow(QMainWindow):
             self.refresh_table()
             self._dirty = True
 
-    def delete_cells_data(self, *args):
+    def delete_cells_data(self, *args, record_undo=True):
         """清除选中单元格的数据（保留行列结构），支持单选 / 框选多个单元格。
 
         这里只清内容，不因为整行 / 整列选中而删除行列；结构删除请用专门的“删除行”菜单。
+        record_undo=False 供“剪切单元格”复用（由调用方统一记撤销）。
         """
         sel = self.table.selectionModel()
         indexes = sel.selectedIndexes() if sel is not None else []
@@ -4991,7 +5023,8 @@ class MainWindow(QMainWindow):
         cols = self.project.columns
         sec = self.current_section
         touched = 0
-        self.push_undo('删除单元格数据')
+        if record_undo:
+            self.push_undo('删除单元格数据')
         self._loading = True
         try:
             for idx in indexes:
@@ -6103,40 +6136,60 @@ class MainWindow(QMainWindow):
             self.status.showMessage('备份目录已设为：' + d, 4000)
 
     def copy_rows(self, *args):
-        """把选中行按 TSV 复制到剪贴板。"""
+        """把选中行按 TSV 复制到剪贴板（按表头视觉顺序，V3.4）。"""
         rows = sorted({idx.row() for idx in self.table.selectedIndexes()})
         if not rows:
             return
         cols = self.project.columns
+        vis_order = self.visual_col_order()
         lines = []
         for r in rows:
             if r < len(self.current_section.rows):
                 row = self.current_section.rows[r]
-                vals = [self.cell_text_for(row, cd['key']) for cd in cols]
+                vals = [self.cell_text_for(row, cols[c]['key'])
+                        for c in vis_order]
                 lines.append('\t'.join(vals))
         QApplication.clipboard().setText('\n'.join(lines))
         self.status.showMessage(f'已复制 {len(lines)} 行', 2500)
 
     def cut_rows(self, *args):
-        """复制并删除选中行。"""
-        rows = sorted({idx.row() for idx in self.table.selectedIndexes()}, reverse=True)
-        if not rows:
+        """剪切：整行选择才删整行（移动）；部分单元格只清空数据，绝不删行。
+
+        V3.4 修复：以往框选某列多个单元格按 Ctrl+X 会把这些行整行剪掉，
+        现在按“是否选中全部列”判断——只有整行才删除行结构。
+        """
+        idxs = self.table.selectedIndexes()
+        if not idxs:
             return
+        rows = sorted({idx.row() for idx in idxs}, reverse=True)
+        sel_cols = {idx.column() for idx in idxs}
+        n_col = len(self.project.columns)
+        full_rows = (len(sel_cols) == n_col)
+        # 先把数据写入剪贴板（结构化整行 / 普通框选 TSV）
         self.copy_cells(cut=True)
-        self.push_undo('剪切行')
-        for r in rows:
-            if r < len(self.current_section.rows):
-                del self.current_section.rows[r]
-        self.project.recalc()
-        self.refresh_table()
-        self._dirty = True
-        self.status.showMessage(f'已剪切 {len(rows)} 行', 2500)
+        if full_rows:
+            self.push_undo('剪切行')
+            for r in rows:
+                if r < len(self.current_section.rows):
+                    del self.current_section.rows[r]
+            self.project.recalc()
+            self.refresh_table()
+            self._dirty = True
+            self.status.showMessage(f'已剪切 {len(rows)} 行', 2500)
+        else:
+            # 仅部分单元格：复制后清空内容，保留行与其他列的数据
+            self.push_undo('剪切单元格')
+            self.delete_cells_data(record_undo=False)
+            self.status.showMessage(
+                '已剪切 %d 个单元格（未删除整行）' % len(idxs), 2500)
 
     # ---------------- 复制 / 拖动填充 / 格式刷 / 排序 / 筛选（V2.10.0） ----------------
 
     def copy_cells(self, *args, cut=False):
         """按选中区域复制（矩形区域按区域，非矩形退回整行复制）。
 
+        V3.4：表头拖动只改视觉顺序、不改逻辑列；这里按**表头视觉顺序**输出
+        每行的 TSV，避免移动列后复制到 WPS 出现错列。
         V3.3：整行复制时同时写结构化剪贴板，粘贴到任意位置会**插入行**并把
         原有数据顺延，不覆盖已有数据；普通框选仍写 TSV，兼容 WPS / Excel。
         """
@@ -6149,19 +6202,23 @@ class MainWindow(QMainWindow):
         if rect is None:
             self.copy_rows()
             return
-        r0, r1, c0, c1 = rect
+        r0, r1, _, _ = rect
+        # 关键：按当前表头视觉顺序输出列，而不是逻辑列循环
+        vis_order = self.visual_col_order()
+        vis_set = set(vis_order)
+        sel_cols = self.sort_cols_visual(i.column() for i in idxs if i.column() in vis_set)
         lines = []
         for r in range(r0, r1 + 1):
             if r < len(sec.rows):
                 row = sec.rows[r]
                 vals = [self.cell_text_for(row, cols[c]['key'])
-                        for c in range(c0, c1 + 1)]
+                        for c in sel_cols]
             else:
-                vals = [''] * (c1 - c0 + 1)
+                vals = [''] * len(sel_cols)
             lines.append('\t'.join(vals))
         md = QMimeData()
         md.setText('\n'.join(lines))
-        full_row = (c0 == 0 and c1 == len(cols) - 1)
+        full_row = (len(sel_cols) == len(cols))
         if full_row:
             payload = {
                 'kind': 'calcbook-rows', 'cut': bool(cut), 'full_row': True,
@@ -6176,7 +6233,7 @@ class MainWindow(QMainWindow):
         QApplication.clipboard().setMimeData(md)
         self.status.showMessage(
             ('已剪切' if cut else '已复制') + ' %d 行 × %d 列%s'
-            % (r1 - r0 + 1, c1 - c0 + 1,
+            % (r1 - r0 + 1, len(sel_cols),
                '（粘贴时插入行，不覆盖已有数据）' if full_row else ''), 2500)
 
     # ---- 拖动填充 ----

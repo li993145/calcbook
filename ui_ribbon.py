@@ -253,8 +253,9 @@ class RibbonPage(QWidget):
 class TitleStrip(QWidget):
     """窗口标题栏（自绘，取代 Windows 系统标题栏）：
 
-    左端直接显示 ``[软件图标] 软件名 V版本 | 工程文件名称 | [文件存放详细地址]``；
-    最右是最小化/最大化/关闭按钮。V3.3 起取消新建/打开/保存/打印四个小按钮。
+    左端一排小快捷按钮（V3.4 起为常用函数：π / 插入函数 / round / 取整），
+    紧跟着一块信息：``[软件图标] 软件名 V版本 | 工程文件名称 | [文件存放详细地址]``；
+    最右是最小化/最大化/关闭按钮。
     """
 
     maximizeRequested = pyqtSignal()
@@ -274,8 +275,33 @@ class TitleStrip(QWidget):
         lay = QHBoxLayout(self)
         lay.setContentsMargins(8, 1, 2, 1)
         lay.setSpacing(1)
-        self.qat = []  # 兼容旧调用：不再生成快捷按钮
-        # 左端直接就是信息块：软件图标 → 软件名+版本 → 工程文件名称 → [文件存放详细地址]
+        # V3.4：左端恢复一排常用函数快捷按钮（π / 插入函数 / round / 取整…）
+        self.qat = []
+        app = QApplication.instance()
+        for item in (actions or []):
+            text = item[0]
+            icon_key = item[1] if len(item) > 1 else ''
+            slot = item[2] if len(item) > 2 else None
+            b = QToolButton(self)
+            b.setIcon(make_icon(app, icon_key) if icon_key else QIcon())
+            b.setIconSize(QSize(16, 16))
+            b.setAutoRaise(True)
+            b.setToolTip(text)
+            b.setFixedSize(26, 26)
+            b.setFocusPolicy(Qt.NoFocus)
+            if callable(slot):
+                b.clicked.connect(lambda checked=False, sl=slot: sl())
+            lay.addWidget(b)
+            self.qat.append(b)
+        if self.qat:
+            sep = QFrame(self)
+            sep.setFrameShape(QFrame.VLine)
+            sep.setFixedHeight(16)
+            sep.setStyleSheet('color:#c2c8d2;')
+            lay.addSpacing(4)
+            lay.addWidget(sep)
+            lay.addSpacing(6)
+        # 左端信息块：软件图标 → 软件名+版本 → 工程文件名称 → [文件存放详细地址]
         self._path = ''
         self._fname = ''
         self._path_max_w = 620
