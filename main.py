@@ -34,7 +34,7 @@ from ui_sortfilter import fill_series
 from core.highlighter import FormulaHighlighter, compute_runs, FCOLOR
 
 APP_NAME = "工程量计算书"
-APP_VER = "3.1.0"
+APP_VER = "3.2.0"
 FILE_EXT = '.gcls'          # 工程文件后缀（内容仍是 JSON，便于排查与迁移）
 
 # ---- 工程文件关联（让资源管理器把 .gcls 显示成软件图标）----
@@ -393,6 +393,7 @@ class PasteTableWidget(QTableWidget):
         self.on_escape = None       # Esc → 取消格式刷 / 填充预览
         self.on_fill_apply = None   # 填充柄松开 → (源rect, 目标rect)
         self.on_paint_apply = None  # 格式刷松开 → 目标rect
+        self.on_edit_begin = None   # (index) 进入单元格编辑 → 冻结镜像让位（V3.2）
         # 填充柄 / 格式刷运行态
         self._fill_drag = None      # {'src':(r0,r1,c0,c1),'start':QPoint,'tgt':rect|None}
         self._paint_drag = None     # {'anchor':(r,c),'cur':(r,c)}
@@ -400,6 +401,16 @@ class PasteTableWidget(QTableWidget):
         self.setMouseTracking(True)
 
     # ---------- 几何辅助 ----------
+    def edit(self, index, trigger, event):
+        """进入编辑前通知主窗口（冻结窗格镜像需要暂时让位，V3.2）。"""
+        cb = getattr(self, 'on_edit_begin', None)
+        if cb:
+            try:
+                cb(index)
+            except Exception:
+                pass
+        return super().edit(index, trigger, event)
+
     def sel_rect(self):
         """当前选择的包围盒（连续时才有意义）：(r0,r1,c0,c1)；空返回 None。"""
         idxs = self.selectedIndexes()
@@ -2878,6 +2889,12 @@ class MainWindow(QMainWindow):
     def eventFilter(self, obj, ev):
         """应用级事件过滤：窗口边缘的拖拽缩放 + 指针形状。"""
         try:
+            # 冻结窗格：主表视口尺寸变化 → 重摆镜像（V3.2）
+            if (getattr(self, 'frozen', None) is not None
+                    and hasattr(self, 'table') and obj is self.table.viewport()
+                    and ev.type() == QEvent.Resize):
+                self.frozen.update_geometry()
+
             # 独立弹窗（单位下拉框、菜单、提示气泡等）不能参与主窗口的边缘缩放：
             # 弹窗是独立顶层窗口，其选项若恰好落在主窗口边缘 6px 内，点击会被
             # 下面的边缘检测 return True 吃掉，表现为“下拉选项点不中”。
@@ -3417,6 +3434,17 @@ class MainWindow(QMainWindow):
         # 行号列右键：插入/删除行、行底色、行高自适应
         self.table.verticalHeader().setContextMenuPolicy(Qt.CustomContextMenu)
         self.table.verticalHeader().customContextMenuRequested.connect(self.row_menu)
+        # 冻结窗格（V3.2）：镜像表滚动/几何/编辑联动
+        from ui_freeze import FrozenPanes
+        self.frozen = FrozenPanes(self.table)
+        self.table.viewport().installEventFilter(self)
+        self.table.verticalScrollBar().valueChanged.connect(self.frozen.sync_v)
+        self.table.horizontalScrollBar().valueChanged.connect(self.frozen.sync_h)
+        self.table.horizontalHeader().sectionResized.connect(
+            lambda *_: self.frozen.sync_widths())
+        self.table.on_edit_begin = lambda idx: self.frozen.hide_for_edit()
+        self.table.itemDelegate().closeEditor.connect(
+            lambda *_: self._after_cell_editor_closed())
         # 表格左上角（全选角）右键：删除全部数据 / 列宽行高自适应
         corner = self.table.findChild(QAbstractButton)
         if corner is not None:
@@ -4103,6 +4131,10 @@ class MainWindow(QMainWindow):
         self._row_height_default = (max(set(vals), key=vals.count) if vals else 34)
         self._loading = False
         self._apply_filter()          # 筛选生效时保持隐藏状态
+        # 冻结窗格（V3.2）：跟随工程保存的冻结行列数，重建镜像（含行列数变化的收敛）
+        if getattr(self, 'frozen', None) is not None:
+            self.frozen.set_freeze(int(getattr(self.project, 'freeze_rows', 0) or 0),
+                                   int(getattr(self.project, 'freeze_cols', 0) or 0))
         self.lbl_status.setText('%s：%d 行，小计 %s'
                                 % (sec.name, len(sec.rows),
                                    fmt_num(sec.total(), section_precision(sec, self.precision))))
@@ -4133,6 +4165,9 @@ class MainWindow(QMainWindow):
     def on_cell_changed(self, item):
         if self._loading or self._syncing:
             return
+        # 冻结窗格（V3.2）：被编辑格在冻结区时同步镜像内容
+        if getattr(self, 'frozen', None) is not None:
+            self.frozen.patch_cell(item.row(), item.column())
         row_i, col = item.row(), item.column()
         if row_i >= len(self.current_section.rows):
             # 在空行输入内容 → 自动追加行
@@ -5006,6 +5041,22 @@ class MainWindow(QMainWindow):
         menu.addAction('本行行高自适应', lambda: self.fit_row_heights([row]))
         menu.addAction('全部行高自适应', lambda: self.fit_row_heights())
         menu.addAction('全部列宽自适应', lambda: self.fit_column_widths())
+        menu.addSeparator()
+        # 本行对齐（V3.2）：selectRow 已选中整行，直接按选中格设置
+        am = menu.addMenu('本行对齐')
+        am.addAction('靠左对齐', lambda: self.cell_align_set('left'))
+        am.addAction('居中对齐', lambda: self.cell_align_set('center'))
+        am.addAction('靠右对齐', lambda: self.cell_align_set('right'))
+        am.addSeparator()
+        am.addAction('恢复默认对齐', lambda: self.cell_align_set('default'))
+        menu.addSeparator()
+        # 冻结窗格（V3.2）：WPS 同款，滚动时冻结行保持可见
+        if self.project.freeze_rows > 0:
+            menu.addAction('取消冻结行（当前冻结前 %d 行）' % self.project.freeze_rows,
+                           lambda: self.freeze_panes(0, self.project.freeze_cols))
+        else:
+            menu.addAction('冻结至本行（含本行）',
+                           lambda r2=row: self.freeze_panes(r2 + 1, self.project.freeze_cols))
         menu.exec_(vh.mapToGlobal(pos))
 
     def corner_menu(self, global_pos):
@@ -5032,6 +5083,19 @@ class MainWindow(QMainWindow):
         menu.addAction('列宽 + 行高 全部自适应', self.fit_all)
         menu.addAction('恢复默认行高', self.reset_row_heights)
         menu.addSeparator()
+        # 全表对齐（V3.2）：先全选再按选中格设置
+        am = menu.addMenu('全表对齐')
+        am.addAction('靠左对齐', lambda: self.align_all('left'))
+        am.addAction('居中对齐', lambda: self.align_all('center'))
+        am.addAction('靠右对齐', lambda: self.align_all('right'))
+        am.addSeparator()
+        am.addAction('恢复默认对齐', lambda: self.align_all('default'))
+        menu.addSeparator()
+        # 冻结窗格（V3.2）
+        if self.project.freeze_rows > 0 or self.project.freeze_cols > 0:
+            menu.addAction('取消全部冻结（当前 前%d行+前%d列）'
+                           % (self.project.freeze_rows, self.project.freeze_cols),
+                           lambda: self.freeze_panes(0, 0))
         menu.addAction('全选表格', self.table.selectAll)
         menu.exec_(global_pos)
 
@@ -5301,6 +5365,8 @@ class MainWindow(QMainWindow):
                 self.table.resizeRowToContents(r)
         for r in rows:
             self.table.setRowHeight(r, max(30, min(200, self.table.rowHeight(r))))
+        if getattr(self, 'frozen', None) is not None:
+            self.frozen.sync_heights()
         self.status.showMessage('行高已自适应（%d 行）' % len(rows), 3000)
 
     def reset_row_heights(self):
@@ -5310,6 +5376,8 @@ class MainWindow(QMainWindow):
         self.table.setWordWrap(False)
         for i in range(self.table.rowCount()):
             self.table.setRowHeight(i, 34)
+        if getattr(self, 'frozen', None) is not None:
+            self.frozen.sync_heights()
         self.status.showMessage('已恢复默认行高', 3000)
 
     def set_row_height_dialog(self, rows=None):
@@ -5333,6 +5401,8 @@ class MainWindow(QMainWindow):
         self.table.setWordWrap(False)
         for r in rows:
             self.table.setRowHeight(r, val)
+        if getattr(self, 'frozen', None) is not None:
+            self.frozen.sync_heights()
         self._dirty = True
         self.status.showMessage('已设置 %d 行的行高为 %d 像素' % (len(rows), val), 3000)
 
@@ -5436,6 +5506,21 @@ class MainWindow(QMainWindow):
             menu.addAction(f'重命名列「{cd["title"]}」', lambda: self.rename_column(col))
             menu.addSeparator()
             menu.addAction(f'删除列「{cd["title"]}」', lambda: self.delete_column(col))
+            menu.addSeparator()
+            # 整列对齐（V3.2）
+            am = menu.addMenu(f'整列对齐「{cd["title"]}」')
+            am.addAction('靠左对齐', lambda c2=col: self.column_align(c2, 'left'))
+            am.addAction('居中对齐', lambda c2=col: self.column_align(c2, 'center'))
+            am.addAction('靠右对齐', lambda c2=col: self.column_align(c2, 'right'))
+            am.addSeparator()
+            am.addAction('恢复默认对齐', lambda c2=col: self.column_align(c2, 'default'))
+        # 冻结窗格（V3.2）：WPS 同款，滚动时冻结列保持可见
+        if self.project.freeze_cols > 0:
+            menu.addAction('取消冻结列（当前冻结前 %d 列）' % self.project.freeze_cols,
+                           lambda: self.freeze_panes(self.project.freeze_rows, 0))
+        elif col >= 0:
+            menu.addAction('冻结至本列（含本列）',
+                           lambda c2=col: self.freeze_panes(self.project.freeze_rows, c2 + 1))
         menu.exec_(h.mapToGlobal(pos))
 
     def narrow_column(self, col):
@@ -5825,6 +5910,60 @@ class MainWindow(QMainWindow):
         self._dirty = True
         self.status.showMessage('已设置 %d 个单元格对齐方式：%s' % (n, name), 4000)
 
+    def _after_cell_editor_closed(self):
+        """单元格编辑结束（V3.2）：恢复冻结镜像并同步被编辑格内容。"""
+        if getattr(self, 'frozen', None) is None:
+            return
+        r, c = self.table.currentRow(), self.table.currentColumn()
+        if r >= 0 and c >= 0:
+            self.frozen.patch_cell(r, c)
+        self.frozen.show_after_edit()
+
+    def column_align(self, col, align):
+        """列头右键“整列对齐”：当前分部该列全部行（不含“不计”列）。"""
+        if not (0 <= col < len(self.project.columns)):
+            return
+        key = self.project.columns[col]['key']
+        if key == 'no_count':
+            QMessageBox.information(self, APP_NAME, '「不计」列不能设置对齐。')
+            return
+        name = {'left': '靠左', 'center': '居中', 'right': '靠右',
+                'default': '默认'}.get(align, align)
+        self.push_undo('整列对齐')
+        n = 0
+        for row in self.current_section.rows:
+            if getattr(row, 'cell_align', None) is None:
+                row.cell_align = {}
+            if align == 'default':
+                (row.cell_align or {}).pop(key, None)
+            else:
+                row.cell_align[key] = align
+            n += 1
+        self.refresh_table()
+        self._dirty = True
+        self.status.showMessage('整列对齐已设置：%s（%d 格）' % (name, n), 4000)
+
+    def align_all(self, align):
+        """左上角右键“全表对齐”：全选后按选中格设置（等效整表）。"""
+        self.table.selectAll()
+        self.cell_align_set(align)
+
+    def freeze_panes(self, rows, cols):
+        """冻结窗格（V3.2）：锁定前 rows 行 / cols 列，随工程保存。"""
+        rows = max(0, int(rows))
+        cols = max(0, int(cols))
+        self.project.freeze_rows = rows
+        self.project.freeze_cols = cols
+        self.frozen.set_freeze(rows, cols)
+        self._dirty = True
+        parts = []
+        if rows:
+            parts.append('前 %d 行' % rows)
+        if cols:
+            parts.append('前 %d 列' % cols)
+        self.status.showMessage('冻结窗格：%s' % ('+'.join(parts) if parts else '已全部取消'),
+                                4000)
+
     def narrow_cells(self):
         """右键“选中单元格转半角”：全角数字/字母/标点转半角（公式列除外，
         公式里的全角括号是注释语法，转半角会改变语义）。"""
@@ -6153,6 +6292,8 @@ class MainWindow(QMainWindow):
         if not f:
             for i in range(self.table.rowCount()):
                 self.table.setRowHidden(i, False)
+            if getattr(self, 'frozen', None) is not None:
+                self.frozen.sync_hidden()
             return
         from ui_sortfilter import filter_match
         cd = next(c for c in cols if c['key'] == f['key'])
@@ -6170,6 +6311,8 @@ class MainWindow(QMainWindow):
                                 % (cd['title'], f['mode'],
                                    f['value'] or f.get('color_value') or '',
                                    shown, len(sec.rows)), 6000)
+        if getattr(self, 'frozen', None) is not None:
+            self.frozen.sync_hidden()
 
     def clear_filter(self):
         if self._filter:

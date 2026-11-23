@@ -136,6 +136,9 @@ class Project:
         # 一个工程可包含多个单项工程，每个单项工程是一棵独立的树
         self.books = [Section("单项工程1")]
         self.engine = FormulaEngine(self.constants)
+        # 冻结窗格（V3.2）：冻结的行数/列数（视图状态，随工程保存）
+        self.freeze_rows = 0
+        self.freeze_cols = 0
 
     @property
     def root(self):
@@ -232,6 +235,8 @@ class Project:
                     constants=self.constants, constant_notes=self.constant_notes,
                     levels=self.levels,
                     columns=self.columns, report=self.report,
+                    freeze_rows=getattr(self, 'freeze_rows', 0),
+                    freeze_cols=getattr(self, 'freeze_cols', 0),
                     books=[b.to_dict() for b in self.books],
                     root=self.books[0].to_dict() if self.books else None, version=4)
 
@@ -255,6 +260,15 @@ class Project:
         # 列定义：兼容旧工程（无 columns 或空列表则用默认）
         cols = d.get('columns') or [dict(c) for c in DEFAULT_COLUMNS]
         p.columns = [dict(c) for c in cols]
+        # 冻结窗格（V3.2）：旧工程无此字段默认不冻结
+        try:
+            p.freeze_rows = max(0, int(d.get('freeze_rows') or 0))
+        except (TypeError, ValueError):
+            p.freeze_rows = 0
+        try:
+            p.freeze_cols = max(0, int(d.get('freeze_cols') or 0))
+        except (TypeError, ValueError):
+            p.freeze_cols = 0
         # 单项工程列表：新格式用 books；兼容旧格式只有 root
         books_data = d.get('books')
         if books_data:
