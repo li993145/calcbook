@@ -16,7 +16,8 @@ from PyQt5.QtWidgets import (
     QScrollArea, QGroupBox, QSpinBox
 )
 from PyQt5.QtCore import (Qt, QSettings, QMimeData, QEvent, QTimer, QUrl, QRectF, QPointF,
-                          QPoint, QSizeF, QRect, pyqtSignal, QObject, QItemSelectionModel)
+                          QPoint, QSizeF, QRect, pyqtSignal, QObject, QItemSelectionModel,
+                          QItemSelection)
 from PyQt5.QtGui import (QFont, QFontMetrics, QColor, QKeySequence, QIcon, QTextCursor,
                          QDesktopServices, QPixmap, QPainter, QPen, QBrush, QPalette,
                          QCursor)
@@ -29,10 +30,11 @@ from core.units import (UNIT_LIST, UNIT_GROUPS, INTEGER_UNITS, REBAR_CONSTANTS,
                         precision_for_unit, section_precision, fmt_const)
 from ui_ribbon import RibbonWidget, TitleStrip
 from ui_printpreview import PrintPreviewPane
+from ui_sortfilter import fill_series
 from core.highlighter import FormulaHighlighter, compute_runs, FCOLOR
 
 APP_NAME = "工程量计算书"
-APP_VER = "2.9.2"
+APP_VER = "2.10.0"
 FILE_EXT = '.gcls'          # 工程文件后缀（内容仍是 JSON，便于排查与迁移）
 
 # ---- 工程文件关联（让资源管理器把 .gcls 显示成软件图标）----
@@ -355,13 +357,186 @@ class FormulaEdit(QTextEdit):
 
 
 class PasteTableWidget(QTableWidget):
-    """支持从 WPS/Excel 多行粘贴（TSV）的表格。"""
+    """支持从 WPS/Excel 多行粘贴（TSV）的表格。
+
+    V2.10.0 起还承担：填充柄拖动复制（自动序号）、格式刷鼠标交互。
+    """
+
     def __init__(self, on_paste=None, on_insert=None, on_delete=None):
         super().__init__()
         self.on_paste = on_paste
         self.on_insert = on_insert
         self.on_delete = on_delete
         self.on_resize = None       # 窗口尺寸变化 → 主窗口重排列宽
+        self.on_copy = None         # Ctrl+C → 主窗口按选中区域复制
+        self.on_cut = None          # Ctrl+X → 主窗口剪切行
+        self.on_escape = None       # Esc → 取消格式刷 / 填充预览
+        self.on_fill_apply = None   # 填充柄松开 → (源rect, 目标rect)
+        self.on_paint_apply = None  # 格式刷松开 → 目标rect
+        # 填充柄 / 格式刷运行态
+        self._fill_drag = None      # {'src':(r0,r1,c0,c1),'start':QPoint,'tgt':rect|None}
+        self._paint_drag = None     # {'anchor':(r,c),'cur':(r,c)}
+        self.paint_mode = False     # 格式刷已拾取、等待点击目标
+        self.setMouseTracking(True)
+
+    # ---------- 几何辅助 ----------
+    def sel_rect(self):
+        """当前选择的包围盒（连续时才有意义）：(r0,r1,c0,c1)；空返回 None。"""
+        idxs = self.selectedIndexes()
+        if not idxs:
+            return None
+        rows = {i.row() for i in idxs}
+        cols = {i.column() for i in idxs}
+        r0, r1 = min(rows), max(rows)
+        c0, c1 = min(cols), max(cols)
+        # 修正：c1 可能超出当前列数（全选角）——裁掉
+        c1 = min(c1, self.columnCount() - 1)
+        if len(idxs) != (r1 - r0 + 1) * (c1 - c0 + 1):
+            return None             # 非矩形选择不支持填充
+        return (r0, r1, c0, c1)
+
+    def _handle_rect(self):
+        """填充柄（选择区右下角 7×7px）。"""
+        rect = self.sel_rect()
+        if rect is None:
+            return None
+        r1, c1 = rect[1], rect[3]
+        if r1 >= self.rowCount() or c1 >= self.columnCount():
+            return None
+        cell = self.visualRect(self.model().index(r1, c1))
+        if cell.width() <= 0 or cell.height() <= 0:
+            return None
+        return QRect(cell.right() - 4, cell.bottom() - 4, 8, 8)
+
+    def _near_handle(self, pos):
+        hr = self._handle_rect()
+        if hr is None:
+            return False
+        return QRect(hr.x() - 5, hr.y() - 5, hr.width() + 10,
+                     hr.height() + 10).contains(pos)
+
+    def _extend_target(self, pos):
+        """根据拖动位置算填充目标 rect（不含源区）。方向按位移大小自动判。"""
+        src = self._fill_drag['src']
+        r0, r1, c0, c1 = src
+        idx = self.indexAt(pos)
+        if not idx.isValid():
+            return None
+        tr, tc = idx.row(), idx.column()
+        sp = self._fill_drag['start']
+        dx, dy = pos.x() - sp.x(), pos.y() - sp.y()
+        if abs(dy) >= abs(dx):
+            if dy >= 0:
+                if tr <= r1:
+                    return None
+                return (r1 + 1, tr, c0, c1)          # 向下
+            if tr >= r0:
+                return None
+            return (tr, r0 - 1, c0, c1)              # 向上
+        else:
+            if dx >= 0:
+                if tc <= c1:
+                    return None
+                return (r0, r1, c1 + 1, tc)          # 向右
+            if tc >= c0:
+                return None
+            return (r0, r1, tc, c0 - 1)              # 向左
+
+    @staticmethod
+    def _union(src, tgt):
+        r0 = min(src[0], tgt[0]); r1 = max(src[1], tgt[1])
+        c0 = min(src[2], tgt[2]); c1 = max(src[3], tgt[3])
+        return (r0, r1, c0, c1)
+
+    def _rect_region(self, rect):
+        """rect → QItemSelectionModel 选择（填充/刷子预览用）。"""
+        r0, r1, c0, c1 = rect
+        tl = self.model().index(r0, c0)
+        br = self.model().index(r1, c1)
+        sel = QItemSelection(tl, br)
+        self.selectionModel().select(sel, QItemSelectionModel.ClearAndSelect)
+
+    # ---------- 事件 ----------
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            pos = event.pos()
+            if self.paint_mode:
+                idx = self.indexAt(pos)
+                if idx.isValid():
+                    self._paint_drag = {'anchor': (idx.row(), idx.column()),
+                                        'cur': (idx.row(), idx.column())}
+                    event.accept()
+                    return
+            elif self._near_handle(pos):
+                rect = self.sel_rect()
+                if rect is not None:
+                    self._fill_drag = {'src': rect, 'start': pos, 'tgt': None}
+                    event.accept()
+                    return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        pos = event.pos()
+        if self._fill_drag is not None:
+            self._fill_drag['tgt'] = self._extend_target(pos)
+            self.viewport().update()
+            event.accept()
+            return
+        if self._paint_drag is not None:
+            idx = self.indexAt(pos)
+            if idx.isValid():
+                self._paint_drag['cur'] = (idx.row(), idx.column())
+                a, cur = self._paint_drag['anchor'], self._paint_drag['cur']
+                self._rect_region((min(a[0], cur[0]), max(a[0], cur[0]),
+                                   min(a[1], cur[1]), max(a[1], cur[1])))
+            event.accept()
+            return
+        # 悬停光标
+        if self.paint_mode or self._near_handle(pos):
+            self.setCursor(Qt.CrossCursor)
+        else:
+            self.setCursor(Qt.ArrowCursor)
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton and self._fill_drag is not None:
+            drag, self._fill_drag = self._fill_drag, None
+            self.viewport().update()
+            tgt = drag.get('tgt')
+            if tgt is not None and self.on_fill_apply:
+                self.on_fill_apply(drag['src'], tgt)
+            event.accept()
+            return
+        if event.button() == Qt.LeftButton and self._paint_drag is not None:
+            drag, self._paint_drag = self._paint_drag, None
+            a, cur = drag['anchor'], drag['cur']
+            rect = (min(a[0], cur[0]), max(a[0], cur[0]),
+                    min(a[1], cur[1]), max(a[1], cur[1]))
+            if self.on_paint_apply:
+                self.on_paint_apply(rect)
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        p = QPainter(self.viewport())
+        # 填充拖动预览：源区 + 目标区整体虚线框
+        if self._fill_drag is not None and self._fill_drag.get('tgt'):
+            u = self._union(self._fill_drag['src'], self._fill_drag['tgt'])
+            tl = self.visualRect(self.model().index(u[0], u[2]))
+            br = self.visualRect(self.model().index(u[1], u[3]))
+            if tl.width() > 0 and br.width() > 0:
+                p.setPen(QPen(QColor('#2f7de0'), 1, Qt.DashLine))
+                p.drawRect(tl.adjusted(0, 0, br.right() - tl.left(),
+                                       br.bottom() - tl.top()))
+            return
+        # 平时画填充柄小方块
+        hr = self._handle_rect()
+        if hr is not None and not self.paint_mode and not self.state() & QAbstractItemView.EditingState:
+            p.setPen(QPen(QColor('#2f7de0'), 1))
+            p.setBrush(QBrush(QColor('#2f7de0')))
+            p.drawRect(hr)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -376,6 +551,20 @@ class PasteTableWidget(QTableWidget):
             # 避免走 QTableWidget 默认粘贴而错位到编码列。编辑中的单元格不走这里。
             if text and self.on_paste:
                 self.on_paste(text)
+                return
+        if event.matches(QKeySequence.Copy) or (
+                event.modifiers() & Qt.ControlModifier and event.key() == Qt.Key_C):
+            if self.on_copy and not self.state() & QAbstractItemView.EditingState:
+                self.on_copy()
+                return
+        if event.matches(QKeySequence.Cut) or (
+                event.modifiers() & Qt.ControlModifier and event.key() == Qt.Key_X):
+            if self.on_cut and not self.state() & QAbstractItemView.EditingState:
+                self.on_cut()
+                return
+        if event.key() == Qt.Key_Escape:
+            if self.on_escape and (self.paint_mode or self._fill_drag):
+                self.on_escape()
                 return
         # Insert 在下方插入行，Delete 删除选中内容（整行/整列/单元格由主窗口判断）
         if event.key() == Qt.Key_Insert:
@@ -2439,6 +2628,9 @@ class MainWindow(QMainWindow):
         self._col_autofit = self.settings.value('col_autofit', True, type=bool)
         # 当前行 / 列高亮（只加淡色底纹，不改变选择模式，避免影响框选删除、粘贴锚点）
         self._hilite_row = self.settings.value('hilite_row', False, type=bool)
+        # V2.10.0：格式刷拾取的格式、生效中的筛选条件
+        self._paint_fmt = None
+        self._filter = None
         self._hilite_col = self.settings.value('hilite_col', False, type=bool)
         # 表格字体（类型取系统字库，大小 6-24；空 = 跟随软件默认微软雅黑）
         self._font_family = self.settings.value('table_font_family', '') or ''
@@ -2887,6 +3079,9 @@ class MainWindow(QMainWindow):
                 ('计算书', [
                     ('导入表格', 'open', self.import_table, '', True),
                     ('分类汇总', 'calc', self.data_summary, '', True),
+                    ('格式刷', 'copy', self.start_format_painter, '', False),
+                    ('排序', 'settings', self.sort_dialog, '', False),
+                    ('筛选', 'settings', self.filter_dialog, '', False),
                     ('数据列定义', 'settings', self.column_setup, '', False),
                     ('选项配置', 'settings', self.autosave_settings, '', False),
                 ]),
@@ -3185,6 +3380,11 @@ class MainWindow(QMainWindow):
         th.setContentsMargins(0, 0, 0, 0)
         th.setSpacing(0)
         self.table = PasteTableWidget(self.paste_text, self.insert_row_below, self.delete_selection)
+        self.table.on_copy = self.copy_cells
+        self.table.on_cut = self.cut_rows
+        self.table.on_escape = self.cancel_painter
+        self.table.on_fill_apply = self.apply_fill_drag
+        self.table.on_paint_apply = self.painter_apply
         # 自定义表头：用户一旦手动拖列宽，就自动关闭“列宽自适应”，避免布局抢回去
         fhdr = FitHeader(Qt.Horizontal, self.table)
         fhdr.on_manual_resize = self._col_autofit_off
@@ -3880,6 +4080,7 @@ class MainWindow(QMainWindow):
         vals = list(heights.values())
         self._row_height_default = (max(set(vals), key=vals.count) if vals else 34)
         self._loading = False
+        self._apply_filter()          # 筛选生效时保持隐藏状态
         self.lbl_status.setText('%s：%d 行，小计 %s'
                                 % (sec.name, len(sec.rows),
                                    fmt_num(sec.total(), section_precision(sec, self.precision))))
@@ -4714,7 +4915,7 @@ class MainWindow(QMainWindow):
                 self.table.selectionModel().select(hit_idx, QItemSelectionModel.ClearAndSelect)
                 self.table.setCurrentIndex(hit_idx)
         menu = QMenu(self)
-        menu.addAction('复制选中单元格  (Ctrl+C)', self.copy_rows)
+        menu.addAction('复制选中单元格  (Ctrl+C)', self.copy_cells)
         menu.addAction('全选表格', self.table.selectAll)
         menu.addSeparator()
         menu.addAction('在上方插入行', self.insert_row_above)
@@ -4723,6 +4924,12 @@ class MainWindow(QMainWindow):
         menu.addAction('清除单元格内容  (Delete)', self.delete_cells_data)
         menu.addAction('删除选中行', self.delete_rows)
         menu.addAction('粘贴 WPS 数据  (Ctrl+V)', self.paste_from_clipboard)
+        menu.addSeparator()
+        menu.addAction('格式刷（复制当前单元格格式，再点目标）', self.start_format_painter)
+        menu.addAction('排序…', self.sort_dialog)
+        menu.addAction('筛选…', self.filter_dialog)
+        act_cf = menu.addAction('清除筛选', self.clear_filter)
+        act_cf.setEnabled(self._filter is not None)
         menu.addSeparator()
         menu.addAction('设置选中行行高…', self.set_row_height_dialog)
         menu.addAction('设置选中列列宽…', self.set_column_width_dialog)
@@ -5656,6 +5863,249 @@ class MainWindow(QMainWindow):
         self.refresh_table()
         self._dirty = True
         self.status.showMessage(f'已剪切 {len(rows)} 行', 2500)
+
+    # ---------------- 复制 / 拖动填充 / 格式刷 / 排序 / 筛选（V2.10.0） ----------------
+
+    def copy_cells(self, *args):
+        """按选中区域复制（矩形区域按区域，非矩形退回整行复制）。"""
+        idxs = self.table.selectedIndexes()
+        if not idxs:
+            return
+        rect = self.table.sel_rect()
+        sec = self.current_section
+        cols = self.project.columns
+        if rect is None:
+            self.copy_rows()
+            return
+        r0, r1, c0, c1 = rect
+        lines = []
+        for r in range(r0, r1 + 1):
+            if r < len(sec.rows):
+                row = sec.rows[r]
+                vals = [self.cell_text_for(row, cols[c]['key'])
+                        for c in range(c0, c1 + 1)]
+            else:
+                vals = [''] * (c1 - c0 + 1)
+            lines.append('\t'.join(vals))
+        QApplication.clipboard().setText('\n'.join(lines))
+        self.status.showMessage('已复制 %d 行 × %d 列' % (r1 - r0 + 1, c1 - c0 + 1), 2500)
+
+    # ---- 拖动填充 ----
+
+    def apply_fill_drag(self, src, tgt):
+        """填充柄松开：把源区值按 WPS 规则填充到目标区（自动序号）。"""
+        sec = self.current_section
+        cols = self.project.columns
+        r0, r1, c0, c1 = src
+        tr0, tr1, tc0, tc1 = tgt
+        vertical = (tc0, tc1) == (c0, c1)       # 纵向填充
+        self.push_undo('拖动填充')
+        n = 0
+        if vertical:
+            offsets = list(range(tr0 - r0, tr1 - r0 + 1))
+            for c in range(c0, c1 + 1):
+                key = cols[c]['key'] if c < len(cols) else ''
+                if not key or key == 'value' or r0 >= len(sec.rows):
+                    continue
+                svals = [self.cell_text_for(sec.rows[r], key)
+                         for r in range(r0, min(r1 + 1, len(sec.rows)))]
+                if key == 'formula':
+                    # 公式列只整体复制——尾号递增会悄悄改掉公式里的常数
+                    newvals = [svals[i % max(1, len(svals))] for i in offsets]
+                else:
+                    newvals = fill_series(svals, offsets)
+                for i, t in enumerate(range(tr0, tr1 + 1)):
+                    if t >= len(sec.rows):
+                        break
+                    self._fill_write(sec.rows[t], key, newvals[i],
+                                     sec.rows[r0 + (i % max(1, len(svals)))])
+                    n += 1
+        else:
+            offsets = list(range(tc0 - c0, tc1 - c0 + 1))
+            for r in range(r0, r1 + 1):
+                if r >= len(sec.rows):
+                    break
+                row = sec.rows[r]
+                svals = [self.cell_text_for(row, cols[c]['key'])
+                         for c in range(c0, min(c1 + 1, len(cols)))]
+                newvals = fill_series(svals, offsets)   # 横向一般不涉及公式列
+                for i, t in enumerate(range(tc0, tc1 + 1)):
+                    if t >= len(cols):
+                        break
+                    self._fill_write(row, cols[t]['key'], newvals[i], row)
+                    n += 1
+        self.project.recalc()
+        self.refresh_table()
+        self._dirty = True
+        self.status.showMessage('已填充 %d 个单元格（Ctrl+Z 可撤销）' % n, 4000)
+
+    def _fill_write(self, row, key, val, src_row):
+        """把填充值写进单元格（no_count 用布尔，其它用文本）。"""
+        if key == 'no_count':
+            row.no_count = bool(getattr(src_row, 'no_count', False))
+            return
+        if hasattr(row, key):
+            setattr(row, key, str(val))
+        else:
+            row.custom[key] = str(val)
+
+    # ---- 格式刷 ----
+
+    def start_format_painter(self):
+        """拾取当前单元格格式（字体 + 填充色），等待点击目标区域。"""
+        r, c = self.table.currentRow(), self.table.currentColumn()
+        sec = self.current_section
+        cols = self.project.columns
+        if not (0 <= r < len(sec.rows)) or not (0 <= c < len(cols)):
+            QMessageBox.information(self, APP_NAME, '请先选中要复制格式的单元格。')
+            return
+        key = cols[c]['key']
+        row = sec.rows[r]
+        font = dict((row.cell_font or {}).get(key) or {})
+        fill = self.row_fill_for(row, cols[c])
+        self._paint_fmt = {'font': font, 'fill': fill}
+        self.table.paint_mode = True
+        self.table.setCursor(Qt.CrossCursor)
+        tip = []
+        if font:
+            tip.append('字体')
+        if fill:
+            tip.append('底色')
+        self.status.showMessage('格式刷已拾取（%s）：点击或拖选目标单元格，'
+                                'Esc 取消' % ('+'.join(tip) or '默认格式'), 6000)
+
+    def cancel_painter(self):
+        """Esc：取消格式刷 / 清除填充预览。"""
+        if self._paint_fmt is not None:
+            self._paint_fmt = None
+            self.table.paint_mode = False
+            self.table.setCursor(Qt.ArrowCursor)
+            self.status.showMessage('已取消格式刷', 2000)
+
+    def painter_apply(self, rect):
+        """把拾取的格式刷到目标区域。"""
+        fmt = self._paint_fmt
+        self.table.paint_mode = False
+        self.table.setCursor(Qt.ArrowCursor)
+        self._paint_fmt = None
+        if not fmt:
+            return
+        sec = self.current_section
+        cols = self.project.columns
+        r0, r1, c0, c1 = rect
+        self.push_undo('格式刷')
+        n = 0
+        for r in range(r0, r1 + 1):
+            if r >= len(sec.rows):
+                break
+            row = sec.rows[r]
+            for c in range(c0, c1 + 1):
+                if c >= len(cols):
+                    break
+                key = cols[c]['key']
+                if key in ('value', 'no_count'):
+                    continue
+                if fmt['font']:
+                    row.cell_font[key] = dict(fmt['font'])
+                else:
+                    (row.cell_font or {}).pop(key, None)
+                if fmt['fill']:
+                    row.cell_fill[key] = fmt['fill']
+                else:
+                    (row.cell_fill or {}).pop(key, None)
+                n += 1
+        self.refresh_table()
+        self._dirty = True
+        self.status.showMessage('格式刷已应用 %d 个单元格（Ctrl+Z 可撤销）' % n, 4000)
+
+    # ---- 排序 ----
+
+    def sort_dialog(self):
+        from ui_sortfilter import SortDialog, sort_rows_with_colors
+        cols = self.project.columns
+        sec = self.current_section
+        col = self.table.currentColumn()
+        if not (0 <= col < len(cols)):
+            col = 0
+        res = SortDialog.exec(self, [c['title'] for c in cols], col)
+        if not res:
+            return
+        cd = cols[res['col']]
+        key = cd['key']
+        items = [(self.cell_text_for(row, key), self.row_fill_for(row, cd))
+                 for row in sec.rows]
+        order = sort_rows_with_colors(items, res['mode'], res['pattern'],
+                                      res['reverse'], res.get('regex_num', True))
+        if order == list(range(len(sec.rows))):
+            self.status.showMessage('顺序未变化', 2000)
+            return
+        self.push_undo('排序')
+        sec.rows = [sec.rows[i] for i in order]
+        self.project.recalc()
+        self.refresh_table()
+        self._dirty = True
+        self.status.showMessage('已按「%s」%s排序（%s，Ctrl+Z 可撤销）'
+                                % (cd['title'], res['mode'],
+                                   '降序' if res['reverse'] else '升序'), 4000)
+
+    # ---- 筛选 ----
+
+    def filter_dialog(self):
+        from ui_sortfilter import FilterDialog, filter_match
+        cols = self.project.columns
+        sec = self.current_section
+        col = self.table.currentColumn()
+        if not (0 <= col < len(cols)):
+            col = 0
+        cd = cols[col]
+        # 收集该列现有填充色供"按颜色"筛选选择
+        seen = []
+        for row in sec.rows:
+            colr = self.row_fill_for(row, cd)
+            if colr and colr not in seen:
+                seen.append(colr)
+        colors = [('', '无填充')] + [(cv, cv) for cv in sorted(seen)]
+        res = FilterDialog.exec(self, [c['title'] for c in cols], col, colors)
+        if not res:
+            return
+        self._filter = {'key': cd['key'], 'mode': res['mode'],
+                        'value': res['value'], 'color_value': res['color_value']}
+        self._apply_filter()
+
+    def _apply_filter(self):
+        """按生效的筛选条件隐藏当前分部不符合的行（只隐藏，不删数据）。"""
+        f = self._filter
+        sec = self.current_section
+        cols = self.project.columns
+        if f and not any(c['key'] == f['key'] for c in cols):
+            self._filter = None                     # 列被删了，筛选失效
+            f = None
+        if not f:
+            for i in range(self.table.rowCount()):
+                self.table.setRowHidden(i, False)
+            return
+        from ui_sortfilter import filter_match
+        cd = next(c for c in cols if c['key'] == f['key'])
+        shown = 0
+        for i, row in enumerate(sec.rows):
+            ok = filter_match(self.cell_text_for(row, f['key']),
+                              self.row_fill_for(row, cd),
+                              f['mode'], f['value'], f.get('color_value'))
+            self.table.setRowHidden(i, not ok)
+            shown += 1 if ok else 0
+        # 筛选生效时把末尾的空占位行也藏起来
+        for i in range(len(sec.rows), self.table.rowCount()):
+            self.table.setRowHidden(i, True)
+        self.status.showMessage('筛选中：「%s」%s%s，显示 %d/%d 行（右键→清除筛选）'
+                                % (cd['title'], f['mode'],
+                                   f['value'] or f.get('color_value') or '',
+                                   shown, len(sec.rows)), 6000)
+
+    def clear_filter(self):
+        if self._filter:
+            self._filter = None
+            self._apply_filter()
+            self.status.showMessage('已清除筛选', 2500)
 
     def show_symbol_picker(self, btn=None):
         """弹出特殊符号面板（工程符号 + 钢筋等级 + 直径/半径），点选即插入。"""
