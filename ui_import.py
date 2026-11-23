@@ -10,6 +10,7 @@
 """
 
 import os
+import re
 import csv
 
 from PyQt5.QtWidgets import (
@@ -22,6 +23,20 @@ from PyQt5.QtCore import Qt
 
 MAX_PREVIEW_ROWS = 100     # 预览最多显示的行数
 MAX_COLS = 60              # 超过这么多列的文件不再处理（异常保护）
+
+# ---- 全角 → 半角 映射表（U+FF01～U+FF5E 对应半角区；U+3000 全角空格）----
+_FW_TABLE = {chr(0xFF01 + i): chr(0x21 + i) for i in range(0x5E)}
+_FW_TABLE['\u3000'] = ' '
+
+
+def narrow_width(text):
+    """全角数字 / 字母 / 标点 / 空格转半角，汉字不变；连续空白合并为一个。
+
+    源表格里常见全角“１２３（ｍ３）”这类内容，直接贴进计算书显得又宽又散，
+    导入时统一规范化成半角。
+    """
+    s = ''.join(_FW_TABLE.get(ch, ch) for ch in str(text))
+    return re.sub(r'[ \t\u3000]+', ' ', s).strip()
 
 
 def read_table_file(path, sheet_name=None):
@@ -68,7 +83,8 @@ def read_table_file(path, sheet_name=None):
 
 
 def trim_data(rows):
-    """去掉末尾整行 / 整列为空的部分，并把每行截到实际有内容的最大列。"""
+    """去掉末尾整行 / 整列为空的部分，并把每行截到实际有内容的最大列。
+    同时对每个单元格做全角→半角规范化。"""
     if not rows:
         return []
     ncol = 0
@@ -81,7 +97,7 @@ def trim_data(rows):
     data = []
     for r in rows:
         if any(str(x).strip() for x in r):
-            data.append([str(x) for x in (r[:ncol] if ncol else r)])
+            data.append([narrow_width(x) for x in (r[:ncol] if ncol else r)])
     return data
 
 
