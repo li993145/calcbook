@@ -244,6 +244,8 @@ class ReportViewerDialog(QDialog):
                               % (grand, grand_rows))
         for i in range(self.tree.columnCount()):
             self.tree.resizeColumnToContents(i) if i == 0 else None
+        # 默认全部展开：报表是来核对数据的，折叠着看不清
+        self.tree.expandAll()
 
     def _nodes_at_depth(self, sec, depth, cur=0):
         """取某一本计算书里第 depth 层的全部节点。"""
