@@ -36,7 +36,7 @@ from core.highlighter import FormulaHighlighter, compute_runs, FCOLOR
 APP_NAME = "工程量计算书"
 # 本表内部复制/剪切的结构化剪贴板格式（多行整行复制 → 粘到任意位置插入行，不覆盖已有数据）
 CB_ROWS_MIME = 'application/x-calcbook-rows'
-APP_VER = "3.5.0"
+APP_VER = "3.6.0"
 FILE_EXT = '.gcls'          # 工程文件后缀（内容仍是 JSON，便于排查与迁移）
 
 # ---- 工程文件关联（让资源管理器把 .gcls 显示成软件图标）----
@@ -73,6 +73,16 @@ class DialogButtonI18nFilter(QObject):
     def eventFilter(self, obj, ev):
         if ev.type() == QEvent.Show and isinstance(obj, QDialog):
             localize_dialog_buttons(obj)
+            # V3.6.0：部分弹窗尺寸偏小、内容显示不全。按内容尺寸兜底放大一次，
+            # 不覆盖已经显式设置更大的对话框。
+            try:
+                hint = obj.sizeHint()
+                if hint.isValid() and (obj.width() < hint.width()
+                                       or obj.height() < hint.height()):
+                    obj.resize(max(obj.width(), hint.width()),
+                               max(obj.height(), hint.height()))
+            except Exception:
+                pass
             # 少数对话框（QInputDialog 等）显示后还会补建按钮，下一轮事件再刷一次
             QTimer.singleShot(0, lambda dlg=obj: localize_dialog_buttons(dlg))
         return super().eventFilter(obj, ev)
@@ -2652,6 +2662,7 @@ class MainWindow(QMainWindow):
         self.current_file = None
         self.recent = self.settings.value('recent', [], type=list) or []
         self._loading = False
+        self._auto_sizing = False   # 程序自动改列宽时不切换到手动模式
         self._formula_row = None   # 辅助框当前关联的行索引
         self._print_area = None    # 选定打印区域：{'section', 'rows', 'keys'}
         self._syncing = False      # 双向同步防循环标志
@@ -2661,9 +2672,15 @@ class MainWindow(QMainWindow):
         self.autosave_min = int(self.settings.value('autosave_min', 5))
         self.autosave_dir = self.settings.value('autosave_dir', '')
         self._dirty = False
-        # 行高 / 列宽默认自适应（V2.5）：不用每次手动点“自适应”
+        # 行高默认自适应；V3.6.0 起列宽默认使用列定义里的固定宽度，
+        # 新增列/刷新表格不会再把用户调好的列宽全部打乱。
         self._row_autofit = self.settings.value('row_autofit', True, type=bool)
-        self._col_autofit = self.settings.value('col_autofit', True, type=bool)
+        if self.settings.value('width_mode_v36', '', type=str) != 'fixed':
+            self._col_autofit = False
+            self.settings.setValue('width_mode_v36', 'fixed')
+            self.settings.setValue('col_autofit', False)
+        else:
+            self._col_autofit = self.settings.value('col_autofit', False, type=bool)
         # 当前行 / 列高亮（只加淡色底纹，不改变选择模式，避免影响框选删除、粘贴锚点）
         self._hilite_row = self.settings.value('hilite_row', False, type=bool)
         # V2.10.0：格式刷拾取的格式、生效中的筛选条件
@@ -2949,6 +2966,20 @@ class MainWindow(QMainWindow):
                             pass
                         self.paste_text(clip)
                         return True
+            if (et == QEvent.MouseButtonPress and ev.button() == Qt.LeftButton
+                    and hasattr(self, 'table') and obj is self.table.viewport()):
+                # V3.6.0：WPS 行为——多选/全选后普通左键点某格只选这一格。
+                # Qt 默认会保留已有多选（落在已选格上视为准备拖动），导致右下角
+                # 统计仍是整表数据，看起来像“统计了当前表格全部数据”。
+                if not (ev.modifiers() & (Qt.ControlModifier | Qt.ShiftModifier)):
+                    try:
+                        hit = self.table.indexAt(ev.pos())
+                        sel = self.table.selectionModel()
+                        if (hit.isValid() and len(sel.selectedIndexes()) > 1
+                                and hit in sel.selectedIndexes()):
+                            sel.clearSelection()
+                    except Exception:
+                        pass
             if et == QEvent.MouseButtonPress and ev.button() == Qt.LeftButton:
                 if not self._maximized:
                     d = self._hit_edge(ev.globalPos())
@@ -3185,7 +3216,6 @@ class MainWindow(QMainWindow):
                     ('排序', 'settings', self.sort_dialog, '', False),
                     ('筛选', 'settings', self.filter_dialog, '', False),
                     ('清除筛选', 'close', self.clear_filter, '', False),
-                    ('数据列定义', 'settings', self.column_setup, '', False),
                     ('选项配置', 'settings', self.autosave_settings, '', False),
                 ]),
             ],
@@ -3291,7 +3321,6 @@ class MainWindow(QMainWindow):
             ('F5 插入()', lambda: self.insert_bracket('cur')),
             ('F6 插入[]', lambda: self.insert_bracket('cur_sq')),
             ('F7 末尾[]', lambda: self.insert_bracket('end_sq')),
-            ('数据列定义', self.column_setup),
             ('列宽自适应', self.fit_column_widths),
             ('行高自适应', self.fit_row_heights),
         ]
@@ -3374,17 +3403,14 @@ class MainWindow(QMainWindow):
         lhead.addWidget(self.btn_nav_fold)
         lv.addLayout(lhead)
         self.tree = QTreeWidget()
-        # 两列：名称 + 层级（单项工程 / 单位工程 / 分部工程 / 分项工程，可在“层级设置”里改名）
-        self.tree.setColumnCount(2)
-        self.tree.setHeaderLabels(['名称', '层级'])
+        # V3.6.0：导航栏不再显示“层级”列，只保留名称；内部层级关系照常保留
+        self.tree.setColumnCount(1)
+        self.tree.setHeaderLabels(['名称'])
         self.tree.setMinimumWidth(200)
         th = self.tree.header()
-        # 分隔线可手动拖动：名称列 Interactive，层级列吃掉剩余宽度
         th.setStretchLastSection(True)
         th.setSectionResizeMode(0, QHeaderView.Interactive)
-        th.setSectionResizeMode(1, QHeaderView.Interactive)
-        self.tree.setColumnWidth(0, 150)
-        self.tree.setColumnWidth(1, 84)
+        self.tree.setColumnWidth(0, 220)
         # 导航栏（含表头）统一常规字重，不用加粗
         self.tree.setStyleSheet('QHeaderView::section { font-weight: 400; }')
         self.tree.setContextMenuPolicy(Qt.CustomContextMenu)
@@ -3580,6 +3606,7 @@ class MainWindow(QMainWindow):
         self.lbl_status.setStyleSheet('color:#555; padding-right:6px;')
         self.status.addPermanentWidget(self.lbl_status)
         self.table.selectionModel().selectionChanged.connect(self.update_selection_stats)
+        self.table.itemSelectionChanged.connect(self.update_selection_stats)
 
         # 报表页：工具条 + 可拖动页边距的纸张预览
         page2 = QWidget()
@@ -3955,7 +3982,7 @@ class MainWindow(QMainWindow):
 
         <h3 style="color:#2f5597;">三、项目结构与层级</h3>
         <ul>
-        <li>导航树有两列「名称 / 层级」。第一级固定是<b>单项工程</b>（默认“单项工程1”，不可删除），往下依次为<b>单位工程 / 分部工程 / 分项工程</b>，可继续往下加，超过四级沿用最后一级名称。</li>
+        <li>导航栏只显示节点「名称」，不再单列显示层级文字；第一级固定是<b>单项工程</b>（默认“单项工程1”，不可删除），往下依次为<b>单位工程 / 分部工程 / 分项工程</b>，可继续往下加，超过四级沿用最后一级名称。内部层级关系照常保留（新建、升级、降级、汇总不受影响），鼠标悬停节点可看到该节点的层级名。</li>
         <li>工具栏「层级设置」可改名、增删层级（例如改成 标段 / 单位工程 / 分部 / 分项）；新建节点自动使用下一级名称，如“分部工程2”。</li>
         <li>树右键：新建单项工程 / 新建下一级 / 新建同级 / 重命名 / 上移 / 下移 / 升级 / 降级 / 删除 / 层级设置 / 工程信息。右键会先选中该节点，不可用的项变灰；删除后可用 Ctrl+Z 撤销。</li>
         </ul>
@@ -3971,8 +3998,9 @@ class MainWindow(QMainWindow):
         <li><b>列宽 / 行高</b>：<b>默认自适应</b>——列宽按内容计算并铺满窗口，行高按内容撑高（长公式 / 长备注自动换行），无需手点。手动拖过列宽后自动列宽会关闭，可在左上角角标右键重新勾选「自动列宽 / 自动行高」恢复；把鼠标移到两列（或两行）表头之间的分隔线上<b>双击</b>可只自适应该列 / 该行。</li>
         <li><b>冻结窗格</b>：右键行号「冻结至本行」/ 列头「冻结至本列」，可同时冻结行列；鼠标停在冻结区上滚轮照常滚动整表，冻结区外数据正常显示；冻结区单元格仍可双击编辑；左上角右键「取消全部冻结」。设置随工程保存。</li>
         <li><b>撤销 / 恢复、查找</b>：Ctrl+Z 撤销、Ctrl+Y 恢复，逐字输入公式只算一步；Ctrl+F 打开查找，可按编号 / 项目名称 / 单位 / 部位 / 计算公式 / 备注或「全部字段」搜索，回车逐个定位到对应行。</li>
-        <li><b>排序 / 筛选</b>：右键或工具栏「计算书编辑」可排序、筛选——先在窗口里选<b>筛选列</b>（选哪列就筛哪列，V3.5 修复）再选条件（等于 / 包含 / 数字比较 / 正则 / 按填充颜色等），只隐藏不删数据、刷新后保持、编辑数据后立即重算；内容留空或正则写错会明确提示。<b>取消筛选</b>有三个入口：筛选窗口内点「清除筛选」、工具栏「清除筛选」、右键「清除筛选」，点后立即恢复显示全部行。</li>
-        <li><b>选区统计与缩放</b>：单选 / 多选「工程量」列的数据，状态栏右下角实时显示 <code>求和=… 平均值=… 计数=…</code>（WPS 式，取代原来的固定小计）；在表格上按住 <b>Ctrl + 鼠标滚轮</b> 可放大 / 缩小单元格显示（字号与手动行高列宽同比例，6–24 号字），不按 Ctrl 时滚轮照常滚动。</li>
+        <li><b>排序 / 筛选</b>：右键或工具栏「计算书编辑」可排序、筛选——先在窗口里选<b>筛选列</b>（选哪列就筛哪列，V3.5 修复）再选条件（等于 / 包含 / 数字比较 / 正则 / 按填充颜色等），只隐藏不删数据、刷新后保持、编辑数据后立即重算；比较时自动统一全 / 半角与空格（V3.6），例如 <code>Ａ－００１</code> 可用 <code>A-001</code> 筛到；内容留空或正则写错会明确提示。<b>取消筛选</b>有三个入口：筛选窗口内点「清除筛选」、工具栏「清除筛选」、右键「清除筛选」，点后立即恢复显示全部行。</li>
+        <li><b>选区统计与缩放</b>：单选 / 多选「工程量」列的数据，状态栏右下角实时显示 <code>求和=… 平均值=… 计数=…</code>（WPS 式，取代原来的固定小计）；多选 / 全选后普通左键点某格会恢复为只选这一格（V3.6），统计只算真正选中的格子。在表格上按住 <b>Ctrl + 鼠标滚轮</b> 可放大 / 缩小单元格显示（字号与手动行高列宽同比例，6–24 号字），不按 Ctrl 时滚轮照常滚动。</li>
+        <li><b>默认列与列宽（V3.6）</b>：默认列顺序为 序号 / 编号 / 项目名称 / 单位 / 工程量 / 计算公式 / 图纸编号 / 大样图来源 / 不计 / 备注，宽度依次 80 / 135 / 340 / 80 / 100 / 600 / 150 / 150 / 80 / 200。列宽默认固定，新增列或刷新表格不会打乱已调好的宽度；表头右键可增删 / 重命名列、设置列宽（工具栏「数据列定义」按钮已取消）。</li>
         </ul>
 
         <h3 style="color:#2f5597;">五、公式与函数</h3>
@@ -4018,14 +4046,11 @@ class MainWindow(QMainWindow):
         proj = self.project
 
         def add(sec, parent_item, is_book=False):
-            it = QTreeWidgetItem([sec.name, proj.level_of(sec)])
+            it = QTreeWidgetItem([sec.name])
             it.setData(0, Qt.UserRole, sec.id)
             it.setData(0, Qt.UserRole + 1, 'book' if is_book else 'section')
             it.setExpanded(sec.expanded)
-            it.setToolTip(0, sec.name)
-            it.setToolTip(1, proj.level_of(sec))
-            # 层级列灰一点，不抢名称的注意力
-            it.setForeground(1, QColor('#7a7a7a'))
+            it.setToolTip(0, '%s（%s）' % (sec.name, proj.level_of(sec)))
             if is_book:
                 # 导航栏统一用常规字体（不加粗），单项工程用 ▣ 前缀区分
                 it.setText(0, '▣ ' + sec.name)
@@ -5426,9 +5451,13 @@ class MainWindow(QMainWindow):
                         widths[i] = int(widths[i] - min(can, cut))
         # 兜底：全部收成合法整数，避免任何 float 漏到 setColumnWidth / setRowHeight
         widths = [max(56, int(round(w))) for w in widths]
-        for j, w in enumerate(widths):
-            if self.table.columnWidth(j) != w:
-                self.table.setColumnWidth(j, w)
+        self._auto_sizing = True
+        try:
+            for j, w in enumerate(widths):
+                if self.table.columnWidth(j) != w:
+                    self.table.setColumnWidth(j, w)
+        finally:
+            self._auto_sizing = False
         self._last_autosize_ok = True
         # 布局还没稳定时算出的宽度可能多出几像素，等一拍后兜底收一次，避免横向滚动条
         QTimer.singleShot(0, self._fit_hbar)
@@ -5444,17 +5473,21 @@ class MainWindow(QMainWindow):
             if not self.table.horizontalScrollBar().isVisible():
                 return
             cols = list(range(self.table.columnCount()))
-            for _ in range(4):
-                vp = self.table.viewport().width()
-                over = sum(self.table.columnWidth(j) for j in cols) - vp + 2
-                if over <= 0:
-                    return
-                idxs = [j for j in cols if self.table.columnWidth(j) > 60]
-                if not idxs:
-                    return
-                per = max(1, over // len(idxs))
-                for j in idxs:
-                    self.table.setColumnWidth(j, int(max(56, self.table.columnWidth(j) - per)))
+            self._auto_sizing = True
+            try:
+                for _ in range(4):
+                    vp = self.table.viewport().width()
+                    over = sum(self.table.columnWidth(j) for j in cols) - vp + 2
+                    if over <= 0:
+                        return
+                    idxs = [j for j in cols if self.table.columnWidth(j) > 60]
+                    if not idxs:
+                        return
+                    per = max(1, over // len(idxs))
+                    for j in idxs:
+                        self.table.setColumnWidth(j, int(max(56, self.table.columnWidth(j) - per)))
+            finally:
+                self._auto_sizing = False
         except Exception:
             log_exception('列宽兜底')
 
@@ -5604,7 +5637,16 @@ class MainWindow(QMainWindow):
                 cd['width'] = w
 
     def _on_col_width_changed(self, *_args):
-        """列宽变化后：写回列定义供打印使用，并按需重排自动行高。"""
+        """列宽变化后：写回列定义供打印使用，并按需重排自动行高。
+
+        V3.6.0：用户手动拖动表头分隔线即视为切换到手动列宽，避免下一次
+        刷新/新增列时又按内容自动重排，把调好的宽度全部改掉。
+        """
+        if getattr(self, '_loading', False) or getattr(self, '_auto_sizing', False):
+            return
+        if getattr(self, '_col_autofit', False):
+            self._col_autofit = False
+            self._set_setting('col_autofit', False)
         try:
             self._sync_col_widths_to_model()
         except Exception:

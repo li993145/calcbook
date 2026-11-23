@@ -16,17 +16,61 @@ DEFAULT_LEVELS = ['单项工程', '单位工程', '分部工程', '分项工程'
 
 
 # 默认列定义：每列 {key, title, width, builtin}
-# 列宽：计算公式最宽，编号/单位/不计较窄，备注放右侧面板
+# V3.6.0：按用户要求重排默认列并固定默认宽度（序号/编号/项目名称/单位/工程量/
+# 计算公式/图纸编号/大样图来源/不计/备注）。新增列时这些宽度不得被重置。
 DEFAULT_COLUMNS = [
-    {'key': 'code', 'title': '编号', 'width': 120, 'builtin': True},
-    {'key': 'name', 'title': '项目名称', 'width': 200, 'builtin': True},
-    {'key': 'part', 'title': '部位', 'width': 130, 'builtin': True},
-    {'key': 'formula', 'title': '计算公式', 'width': 480, 'builtin': True},
-    {'key': 'unit', 'title': '单位', 'width': 60, 'builtin': True},
+    {'key': 'seq', 'title': '序号', 'width': 80, 'builtin': True},
+    {'key': 'code', 'title': '编号', 'width': 135, 'builtin': True},
+    {'key': 'name', 'title': '项目名称', 'width': 340, 'builtin': True},
+    {'key': 'unit', 'title': '单位', 'width': 80, 'builtin': True},
     {'key': 'value', 'title': '工程量', 'width': 100, 'builtin': True},
-    {'key': 'remark', 'title': '备注', 'width': 160, 'builtin': True},
-    {'key': 'no_count', 'title': '不计', 'width': 50, 'builtin': True},
+    {'key': 'formula', 'title': '计算公式', 'width': 600, 'builtin': True},
+    {'key': 'drawing_no', 'title': '图纸编号', 'width': 150, 'builtin': True},
+    {'key': 'detail_source', 'title': '大样图来源', 'width': 150, 'builtin': True},
+    {'key': 'no_count', 'title': '不计', 'width': 80, 'builtin': True},
+    {'key': 'remark', 'title': '备注', 'width': 200, 'builtin': True},
 ]
+
+# V3.5 及以前的默认宽度：用于判断老工程里某列宽度是否被用户手动改过
+LEGACY_DEFAULT_WIDTHS = {'code': 120, 'name': 200, 'part': 130,
+                         'formula': 480, 'unit': 60, 'value': 100,
+                         'remark': 160, 'no_count': 50}
+
+
+def migrate_columns(cols):
+    """老工程列定义升级：补齐 V3.6 新增内置列、按新顺序排列，保留用户改动。
+
+    * 老工程已有列的名称、颜色等属性原样保留；
+    * 宽度只有在“等于老默认值”时才换成新默认值，用户手动调过的宽度保留；
+    * 老工程里的「部位」等不在新默认列里的列放到末尾，数据不会丢失。
+    """
+    if not cols:
+        return [dict(c) for c in DEFAULT_COLUMNS]
+    old = {str(c.get('key', '')): c for c in cols}
+    if 'seq' in old or 'part' not in old:
+        return [dict(c) for c in cols]
+    result = []
+    used = set()
+    for dcol in DEFAULT_COLUMNS:
+        c = dict(dcol)
+        oc = old.get(dcol['key'])
+        if oc is not None:
+            used.add(dcol['key'])
+            for k, v in oc.items():
+                if k != 'width':
+                    c[k] = v
+            ow = oc.get('width')
+            base = LEGACY_DEFAULT_WIDTHS.get(dcol['key'])
+            try:
+                if ow is not None and base is not None and int(ow) != int(base):
+                    c['width'] = int(ow)    # 用户手动调过的宽度保留
+            except (TypeError, ValueError):
+                pass
+        result.append(c)
+    for c in cols:
+        if str(c.get('key', '')) not in used:
+            result.append(dict(c))
+    return result
 
 
 class Row:
@@ -258,8 +302,7 @@ class Project:
             lv = [str(x).strip() for x in lv if str(x).strip()]
         p.levels = lv or list(DEFAULT_LEVELS)
         # 列定义：兼容旧工程（无 columns 或空列表则用默认）
-        cols = d.get('columns') or [dict(c) for c in DEFAULT_COLUMNS]
-        p.columns = [dict(c) for c in cols]
+        p.columns = migrate_columns(d.get('columns') or [dict(c) for c in DEFAULT_COLUMNS])
         # 冻结窗格（V3.2）：旧工程无此字段默认不冻结
         try:
             p.freeze_rows = max(0, int(d.get('freeze_rows') or 0))

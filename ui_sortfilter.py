@@ -6,6 +6,7 @@
 """
 
 import re
+import unicodedata
 
 from PyQt5.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel,
                              QComboBox, QLineEdit, QSpinBox, QCheckBox,
@@ -192,20 +193,32 @@ FILTER_MODES = ['等于', '不等于', '包含', '不包含', '开头是',
                 '正则匹配', '按填充颜色是']
 
 
+def norm_text(s):
+    """筛选比较统一口径：全角→半角、全角空格→半角空格，再去首尾空白。
+
+    V3.6.0：用户录入的全角数字/字母/标点与筛选框里输入的半角字符此前无法
+    互相匹配（例如单元格「Ａ－００１」、筛选「A-001」），这是“筛选不全”
+    的主要原因之一。NFKC 同时处理全角空格、全角冒号、全角括号等。
+    """
+    if s is None:
+        return ''
+    return unicodedata.normalize('NFKC', str(s)).strip()
+
+
 def filter_match(text, color, mode, value, color_value=None):
-    """单元格是否通过筛选（True=显示）。"""
-    t = str(text if text is not None else '')
-    v = str(value if value is not None else '')
+    """单元格是否通过筛选（True=显示）。比较前统一全半角。"""
+    t = norm_text(text)
+    v = norm_text(value)
     if mode == '等于':
-        return t.strip() == v.strip()
+        return t == v
     if mode == '不等于':
-        return t.strip() != v.strip()
+        return t != v
     if mode == '包含':
         return v in t
     if mode == '不包含':
         return v not in t
     if mode == '开头是':
-        return t.strip().startswith(v.strip())
+        return t.startswith(v)
     if mode in ('大于', '大于等于', '小于', '小于等于'):
         n1, n2 = parse_num(t), parse_num(v)
         if n1 is None:
@@ -235,6 +248,9 @@ def _build_dlg(title, parent):
     from PyQt5.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QLabel
     dlg = QDialog(parent)
     dlg.setWindowTitle(title)
+    # V3.6.0：列多、颜色多时内容易被挤在很小的窗口里，给一个下限
+    dlg.setMinimumWidth(560)
+    dlg.setMinimumHeight(280)
     v = QVBoxLayout(dlg)
     return dlg, v
 
