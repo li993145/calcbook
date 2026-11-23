@@ -24,19 +24,22 @@ from PyQt5.QtGui import (QFont, QFontMetrics, QFontDatabase, QColor, QKeySequenc
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
-from core.model import Project, Section, Row, DEFAULT_LEVELS
+from core.model import Project, Section, Row, DEFAULT_LEVELS, new_id
 from core.exporter import export_xlsx
 from core.units import (UNIT_LIST, UNIT_GROUPS, INTEGER_UNITS, REBAR_CONSTANTS,
-                        precision_for_unit, section_precision, fmt_const)
+                        precision_for_unit, section_precision, fmt_const, fmt_num)
 from ui_ribbon import RibbonWidget, TitleStrip
 from ui_printpreview import PrintPreviewPane
 from ui_sortfilter import fill_series
 from core.highlighter import FormulaHighlighter, compute_runs, FCOLOR
+from ui_options import (DEFAULT_OPTIONS, OptionConfigDialog, ProjectOptionsDialog,
+                        check_password, merged_options)
+from ui_report import ReportViewerDialog
 
 APP_NAME = "工程量计算书"
 # 本表内部复制/剪切的结构化剪贴板格式（多行整行复制 → 粘到任意位置插入行，不覆盖已有数据）
 CB_ROWS_MIME = 'application/x-calcbook-rows'
-APP_VER = "3.6.1"
+APP_VER = "3.7.0"
 FILE_EXT = '.gcls'          # 工程文件后缀（内容仍是 JSON，便于排查与迁移）
 # V3.6.1：备份默认放到固定目录，不再跟随工程文件所在目录；启动时自动创建。
 DEFAULT_BACKUP_DIR = r'D:\手算工程量计算书\bak'
@@ -300,20 +303,6 @@ COLUMNS = [
 ]
 
 
-def fmt_num(v, prec=3):
-    """按位数格式化工程量：四舍五入（half-up）、带千分位；None 显示空。"""
-    if v is None:
-        return ''
-    try:
-        q = Decimal(1).scaleb(-int(prec))
-        d = Decimal(str(float(v))).quantize(q, rounding=ROUND_HALF_UP)
-        if d == 0:
-            d = abs(d)          # 避免 -0.00
-    except Exception:
-        return str(v)
-    return format(d, ',.%df' % int(prec))
-
-
 # ===== 工程符号 =====
 # V3.6.1：钢筋等级符号改用 TssdEng（探索者）字体里的国标制图符号。
 # TssdEng 把四级钢筋符号放在 Windows 私用区（EUDC）：
@@ -428,6 +417,81 @@ class FormulaEdit(QTextEdit):
                 self.on_apply()
             return
         super().keyPressEvent(event)
+
+
+class CellEditorFilter(QObject):
+    """单元格编辑器的事件过滤器（V3.7.0）。
+
+    负责两件在「选项配置 → 编辑辅助功能」里开关的事：
+
+    * 符号即时翻译：* → ×、/ → ÷、+ → ＋、- → －、[] → {}（兼容 GBQ）；
+    * 回车键效果：回车后光标向下换行，或向右移动一格。
+    """
+
+    def __init__(self, win, delegate=None, parent=None):
+        super().__init__(parent)
+        self.win = win
+        self.delegate = delegate
+
+    def _char_map(self):
+        m = {}
+        w = self.win
+        try:
+            if w.opt('mul_star'):
+                m['*'] = '×'
+            if w.opt('mul_div'):
+                m['/'] = '÷'
+            if w.opt('mul_plus'):
+                m['+'] = '＋'
+            if w.opt('mul_minus'):
+                m['-'] = '－'
+            if w.opt('bracket_gbq'):
+                m['['] = '{'
+                m[']'] = '}'
+        except Exception:
+            pass
+        return m
+
+    def eventFilter(self, obj, ev):
+        if ev.type() == QEvent.KeyPress:
+            try:
+                if (ev.key() in (Qt.Key_Return, Qt.Key_Enter)
+                        and not (ev.modifiers() & (Qt.ControlModifier | Qt.ShiftModifier))):
+                    if self.win.opt('enter_dir', 'down') == 'right':
+                        self._commit_and_move_right(obj)
+                        return True
+                m = self._char_map()
+                ch = ev.text()
+                if ch and len(ch) == 1 and ch in m and isinstance(obj, QLineEdit):
+                    obj.insert(m[ch])
+                    return True
+            except Exception:
+                pass
+        return super().eventFilter(obj, ev)
+
+    def _commit_and_move_right(self, editor):
+        """提交当前编辑内容，然后把光标移到右边一格。"""
+        view = self.win.table
+        r, c = view.currentRow(), view.currentColumn()
+        d = self.delegate
+        try:
+            if d is not None:
+                d.commitData.emit(editor)
+                d.closeEditor.emit(editor, QAbstractItemDelegate.NoHint)
+        except Exception:
+            pass
+        QTimer.singleShot(0, lambda: self._move_right(r, c))
+
+    def _move_right(self, r, c):
+        view = self.win.table
+        try:
+            if c + 1 < view.columnCount():
+                view.setCurrentCell(r, c + 1)
+            else:
+                nr = min(r + 1, max(0, view.rowCount() - 1))
+                view.setCurrentCell(nr, 0)
+        except Exception:
+            pass
 
 
 class PasteTableWidget(QTableWidget):
@@ -638,10 +702,14 @@ class PasteTableWidget(QTableWidget):
                 return
         # 末尾行敲回车：自动追加新行（WPS 同款）
         if (event.key() in (Qt.Key_Return, Qt.Key_Enter)
-                and not self.state() & QAbstractItemView.EditingState
-                and self.on_enter_last and self.currentRow() >= self.rowCount() - 1):
-            self.on_enter_last()
-            return
+                and not self.state() & QAbstractItemView.EditingState):
+            # V3.7.0：回车键效果 = 向右 时，光标往右走一格
+            if getattr(self, 'enter_dir', 'down') == 'right':
+                self._move_cursor_right()
+                return
+            if self.on_enter_last and self.currentRow() >= self.rowCount() - 1:
+                self.on_enter_last()
+                return
         if event.matches(QKeySequence.Copy) or (
                 event.modifiers() & Qt.ControlModifier and event.key() == Qt.Key_C):
             if self.on_copy and not self.state() & QAbstractItemView.EditingState:
@@ -666,6 +734,15 @@ class PasteTableWidget(QTableWidget):
                 self.on_delete()
             return
         super().keyPressEvent(event)
+
+    def _move_cursor_right(self):
+        """回车键效果 = 向右：光标往右一格，超出则回到下一行第一格。"""
+        r, c = self.currentRow(), self.currentColumn()
+        if c + 1 < self.columnCount():
+            self.setCurrentCell(r, c + 1)
+        else:
+            nr = min(r + 1, max(0, self.rowCount() - 1))
+            self.setCurrentCell(nr, 0)
 
 
 from PyQt5.QtGui import QKeySequence
@@ -721,6 +798,11 @@ class LiveSyncDelegate(QStyledItemDelegate):
             self.win._cell_editor = editor
             editor.textChanged.connect(self.win.on_cell_editor_text)
             editor.destroyed.connect(self.win._on_editor_destroyed)
+        # V3.7.0：符号即时翻译 + 回车键效果（向下 / 向右）
+        try:
+            editor.installEventFilter(self.win.ensure_cell_filter(self))
+        except Exception:
+            pass
         return editor
 
     def _commit(self, editor):
@@ -799,6 +881,12 @@ class LiveSyncDelegate(QStyledItemDelegate):
             self.initStyleOption(opt, index)
             text = opt.text or ''
             opt.text = ''
+            if key == 'formula':
+                # V3.7.0：选项配置里的“加宽括号”只影响显示，不改数据
+                try:
+                    text = self.win.widen_brackets(text)
+                except Exception:
+                    pass
             if key == 'no_count':
                 opt.features &= ~QStyleOptionViewItem.HasCheckIndicator
             style = opt.widget.style() if opt.widget is not None else QApplication.style()
@@ -828,7 +916,11 @@ class LiveSyncDelegate(QStyledItemDelegate):
             opt = QStyleOptionViewItem(option)
             self.initStyleOption(opt, index)
             font = QFont(self.win.table.font())
-            lines = self._wrap_formula(opt.text or '', max(40, option.rect.width() - 9), font)
+            try:
+                disp = self.win.widen_brackets(opt.text or '')
+            except Exception:
+                disp = opt.text or ''
+            lines = self._wrap_formula(disp, max(40, option.rect.width() - 9), font)
             need = len(lines) * QFontMetrics(font).height() + 8
             base.setHeight(int(max(30, min(300, need))))
         except Exception:
@@ -1931,6 +2023,36 @@ class SummaryPanel(QFrame):
 
 
 
+class SummaryDialog(QDialog):
+    """分类汇总弹窗（V3.7.0）。
+
+    分类汇总不再常驻右侧，改为独立窗口：右键点单元格、或点 Ribbon 的“数据汇总”
+    都会弹出这里；关掉窗口后面板回到原位（隐藏状态）。
+    """
+
+    def __init__(self, win, parent=None):
+        super().__init__(parent or win)
+        self.win = win
+        self.setWindowTitle('分类汇总')
+        self.setMinimumSize(720, 480)
+        self.resize(880, 600)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(6, 6, 6, 6)
+        lay.setSpacing(4)
+        # 直接把主窗口那块面板搬过来用，刷新、导出、复制都还是同一份数据
+        self.panel = win.summary_panel
+        self.panel.setParent(self)
+        self.panel.btn_fold.setVisible(False)
+        self.panel.btn_max.setVisible(False)
+        lay.addWidget(self.panel, 1)
+        self.panel.setVisible(True)
+        self.panel.refresh()
+
+    def done(self, result):
+        # 汇总面板一直留在窗口里，关闭弹窗只是隐藏它（数据不丢）
+        QDialog.done(self, result)
+
+
 class MultiSummaryDialog(QDialog):
     """多条件汇总设置：多个分组字段 + 多条筛选条件（满足全部 / 满足任一）。"""
 
@@ -2701,6 +2823,10 @@ class MainWindow(QMainWindow):
                 pass
         self.settings = make_settings()
         self.precision = int(self.settings.value('precision', 3))
+        # V3.7.0：选项配置（项目选项 / 选项配置 两个对话框读写的就是这份配置）
+        self.options = self._load_options()
+        self.annotation_labels = self._load_json('annotation_labels', [])
+        self.custom_symbols = self._load_json('custom_symbols', [])
         self.project = Project('未命名工程')
         self.current_section = self.project.root
         self.current_file = None
@@ -2749,6 +2875,8 @@ class MainWindow(QMainWindow):
         self._pending_undo = None    # 正在连续编辑时的改动前快照
         self._pending_label = ''
         self.last_file = self.settings.value('last_file', '') or ''
+        self._clip_section = None     # 项目结构树里复制出来的节点（待粘贴）
+        self._summary_dialog = None   # 分类汇总弹窗
         self.autosave_timer = QTimer(self)
         self.autosave_timer.timeout.connect(self.autosave_tick)
         self.reset_autosave_timer()
@@ -2756,6 +2884,14 @@ class MainWindow(QMainWindow):
         self.update_title()
         self.resize(1500, 900)
         self.setMinimumWidth(1100)
+        # V3.7.0：快速启动 → 记住上次关闭窗口大小及位置
+        if self.opt('save_geometry', True) and not os.environ.get('CALCBOOK_NO_RESTORE'):
+            geo = self.settings.value('win_geometry')
+            if geo:
+                try:
+                    self.restoreGeometry(geo)
+                except Exception:
+                    pass
         def res_path(name):
             base = getattr(sys, '_MEIPASS', HERE)
             return os.path.join(base, name)
@@ -2775,13 +2911,13 @@ class MainWindow(QMainWindow):
         # 每次启动都显示全新空白工程；只有显式设置 CALCBOOK_RESTORE=1 才恢复
         # （双击 .gcls 文件打开由 main() 的命令行参数单独处理，不受此影响）。
         restored = False
-        if os.environ.get('CALCBOOK_RESTORE') == '1':
+        if os.environ.get('CALCBOOK_RESTORE') == '1' or self.opt('autoload_last', False):
             restored = self.restore_last_project()
         if not restored:
             self.refresh_tree()
             self.refresh_table()
         # 避免把上次工程路径留在配置里：默认清空自动恢复目标（最近打开列表另存）
-        if self.last_file and os.environ.get('CALCBOOK_RESTORE') != '1':
+        if self.last_file and not restored and not self.opt('autoload_last', False):
             self.last_file = ''
             try:
                 self.settings.remove('last_file')
@@ -2791,6 +2927,102 @@ class MainWindow(QMainWindow):
         # 诊断开关（发版时用 set CALCBOOK_DUMP=1 启动，会把面板几何写到 dump 文件）
         if os.environ.get('CALCBOOK_DUMP'):
             QTimer.singleShot(3000, self._dump_geometry)
+
+    # ---------------- 选项配置读写（V3.7.0）----------------
+    def _load_json(self, key, default):
+        """从设置里读一段 JSON（设置文件被改坏时返回默认值，不影响启动）。"""
+        raw = self.settings.value(key, '', type=str)
+        if not raw:
+            return list(default)
+        try:
+            data = json.loads(raw)
+        except Exception:
+            return list(default)
+        return data if isinstance(data, type(default)) else list(default)
+
+    def _save_json(self, key, value):
+        try:
+            self.settings.setValue(key, json.dumps(value, ensure_ascii=False))
+        except Exception:
+            pass
+
+    def _load_options(self):
+        """读取「选项配置」的全部设置。"""
+        raw = self.settings.value('options_json', '', type=str)
+        data = {}
+        if raw:
+            try:
+                data = json.loads(raw)
+            except Exception:
+                data = {}
+        opt = merged_options(data if isinstance(data, dict) else {})
+        # 老版本把字号存在 table_font_size 里，这里迁移一次到“显示配置 → 字体大小”
+        if isinstance(data, dict) and 'font_size' not in data:
+            try:
+                legacy = int(self.settings.value('table_font_size', 0) or 0)
+                if legacy > 0:
+                    opt['font_size'] = max(7, min(20, legacy))
+            except Exception:
+                pass
+        # 自动保存的三个值历史上是独立存的，这里合并进来，保证两处一致
+        opt['autosave_enabled'] = bool(self.settings.value('autosave_enabled', False, type=bool))
+        opt['autosave_min'] = int(self.settings.value('autosave_min', 5) or 5)
+        opt['autosave_dir'] = self.settings.value('autosave_dir', '', type=str) or ''
+        return opt
+
+    def save_options(self, opt=None):
+        """保存选项，并立即同步到各生效点（字体、自动保存、备份目录等）。"""
+        if opt is not None:
+            self.options = merged_options(opt)
+        else:
+            self.options = merged_options(self.options)
+        self._save_json('options_json', self.options)
+        # 自动保存相关的三项仍按老方式单独存一份，老工程/老脚本不受影响
+        self.autosave_enabled = bool(self.options.get('autosave_enabled', False))
+        self.autosave_min = int(self.options.get('autosave_min', 3) or 3)
+        self.autosave_dir = self.options.get('autosave_dir', '') or ''
+        self.settings.setValue('autosave_enabled', self.autosave_enabled)
+        self.settings.setValue('autosave_min', self.autosave_min)
+        self.settings.setValue('autosave_dir', self.autosave_dir)
+        self.reset_autosave_timer()
+        self.apply_option_effects()
+
+    def opt(self, key, default=None):
+        """取一项选项。"""
+        if key in self.options:
+            return self.options[key]
+        return DEFAULT_OPTIONS.get(key, default)
+
+    def apply_option_effects(self):
+        """把选项立刻作用到界面（字体大小、辅助窗、ribbon 展开等）。"""
+        try:
+            family = getattr(self, '_font_family', '') or '微软雅黑'
+            size = int(self.opt('font_size', 9) or 9)
+            self._apply_table_font(family, size, refit=True)
+        except Exception:
+            pass
+        try:
+            self.set_helper_visible(bool(self.opt('show_helper', True)))
+        except Exception:
+            pass
+        try:
+            self.set_ribbon_expanded(bool(self.opt('ribbon_expanded', True)))
+        except Exception:
+            pass
+        try:
+            table = getattr(self, 'table', None)
+            if table is not None:
+                table.enter_dir = self.opt('enter_dir', 'down')
+        except Exception:
+            pass
+        try:
+            self.apply_note_color()
+        except Exception:
+            pass
+        try:
+            self.refresh_tree()
+        except Exception:
+            pass
 
     def _dump_geometry(self):
         try:
@@ -3227,6 +3459,8 @@ class MainWindow(QMainWindow):
         self.update_title()
 
         # ===== Ribbon 工具栏 =====
+        # V3.7.0：按成熟工程量软件的版面重排分组（文件 / 编辑 / 层级 / 剪贴板 / 选项），
+        #           取消了“用户登录”这类与手算无关的入口。
         sections = {
             '计算书编辑': [
                 ('文件', [
@@ -3235,47 +3469,52 @@ class MainWindow(QMainWindow):
                     ('保存', 'save', self.save_project, 'Ctrl+S', True),
                     ('另存为', 'copy', self.save_as, '', False),
                     ('最近打开', 'open', self.show_recent, '', False),
+                    ('备份目录', 'settings', self.open_backup_dir, '', False),
+                    ('导入表格', 'open', self.import_table, '', False),
                 ]),
                 ('编辑', [
-                    ('插入计算式', 'add', self.insert_row_below, 'Ctrl+I', True),
-                    ('删除', 'delete', self.delete_rows, 'Ctrl+Delete', True),
-                    ('剪切', 'copy', self.cut_rows, 'Ctrl+X', False),
-                    ('复制', 'copy', self.copy_rows, 'Ctrl+C', False),
-                    ('粘贴', 'copy', self.paste_from_clipboard, 'Ctrl+V', True),
+                    ('项目选项', 'settings', self.project_options, '', True),
+                    ('插入计算式', 'add', self.insert_row_below, 'F9', True),
+                    ('添加计算式', 'add', self.add_row_at_end, '', False),
+                    ('插入明细', 'add', self.insert_child_section, '', False),
+                    ('插入分部', 'add', self.insert_section_node, '', False),
+                    ('添加分部', 'add', self.add_section_node, '', False),
+                    ('用分部打新', 'copy', self.duplicate_section, '', False),
                 ]),
-                ('编辑2', [
+                ('层级', [
                     ('上移', 'up', self.move_section_up, '', False),
                     ('下移', 'down', self.move_section_down, '', False),
                     ('升级', 'up', self.promote_section, '', False),
                     ('降级', 'down', self.demote_section, '', False),
-                    ('层级设置', 'settings', self.level_setup, '', False),
-                    ('特殊符号', 'settings', self.show_symbol_picker, '', False),
+                    ('特殊字符', 'settings', self.show_symbol_picker, '', False),
+                    ('注释标签', 'settings', self.insert_annotation_label, '', False),
                 ]),
-                ('编辑3', [
+                ('剪贴板', [
+                    ('复制', 'copy', self.copy_rows, 'Ctrl+C', False),
+                    ('剪切', 'copy', self.cut_rows, 'Ctrl+X', False),
+                    ('删除', 'delete', self.delete_rows, 'Ctrl+Delete', False),
+                    ('粘贴', 'copy', self.paste_from_clipboard, 'Ctrl+V', True),
                     ('恢复', 'redo', self.redo, 'Ctrl+Y', False),
                     ('撤销', 'undo', self.undo, 'Ctrl+Z', False),
-                    ('重命名', 'settings', self.rename_section, 'F2', False),
-                    ('查找', 'settings', self.find_replace, 'Ctrl+F', False),
                 ]),
-                ('格式', [
-                    ('填充颜色', '▤', self.fill_color_dialog, '', False),
-                    ('清除填充', '▢', self.clear_fill, '', False),
+                ('表格', [
+                    ('查找替换', 'settings', self.find_replace, 'Ctrl+F', False),
+                    ('层级设置', 'settings', self.level_setup, '', False),
                     ('表格字体', 'settings', self.font_setup, '', False),
-                ]),
-                ('计算书', [
-                    ('导入表格', 'open', self.import_table, '', True),
-                    ('分类汇总', 'calc', self.data_summary, '', True),
                     ('格式刷', 'copy', self.start_format_painter, '', False),
                     ('排序', 'settings', self.sort_dialog, '', False),
                     ('筛选', 'settings', self.filter_dialog, '', False),
                     ('清除筛选', 'close', self.clear_filter, '', False),
-                    ('选项配置', 'settings', self.autosave_settings, '', False),
+                ]),
+                ('选项', [
+                    ('选项配置', 'settings', self.option_config, '', True),
                 ]),
             ],
-            '数据输出': [
-                ('导出', [
-                    ('导出Excel表格', 'export', self.export_excel, '', True),
-                    ('导出WPS表格', 'export', self.export_wps, '', True),
+            '数据导出': [
+                ('报表', [
+                    ('查看报表', 'doc', self.view_report, '', True),
+                    ('导出表格', 'export', self.export_excel, '', True),
+                    ('数据汇总', 'calc', self.data_summary, '', True),
                 ]),
                 ('打印', [
                     ('打印', 'print', self.print_report, 'Ctrl+P', True),
@@ -3402,7 +3641,7 @@ class MainWindow(QMainWindow):
                 b.clicked.connect(lambda checked=False, sl=slot: sl())
             qb.addWidget(b)
         qb.addStretch(1)
-        # 右侧分类汇总收起后，这里出现“展开汇总”按钮
+        # 分类汇总改成弹窗后，这里不再有“展开汇总”按钮
         self.btn_sum_open = QPushButton('汇总 ▶')
         self.btn_sum_open.setObjectName('quickLink')
         self.btn_sum_open.setFlat(True)
@@ -3410,7 +3649,7 @@ class MainWindow(QMainWindow):
                                         ' border-radius:2px; background:#ffffff;'
                                         ' color:#24507a; font-size:8.5pt; padding:0px 4px; }'
                                         'QPushButton#quickLink:hover { background:#dce8f5; }')
-        self.btn_sum_open.setToolTip('展开右侧分类汇总面板')
+        self.btn_sum_open.setToolTip('弹出分类汇总窗口')
         self.btn_sum_open.setVisible(False)
         self.btn_sum_open.clicked.connect(lambda: self.fold_summary(False))
         qb.addWidget(self.btn_sum_open)
@@ -3470,6 +3709,13 @@ class MainWindow(QMainWindow):
         self.tree.customContextMenuRequested.connect(self.tree_menu)
         self.tree.currentItemChanged.connect(self.on_tree_select)
         self.tree.itemDoubleClicked.connect(self._on_tree_double)
+        # 项目结构树：Ctrl+C 复制节点、Ctrl+V 粘贴节点（复制/粘贴的入口都在右键菜单里）
+        sc_copy = QShortcut(QKeySequence.Copy, self.tree)
+        sc_copy.setContext(Qt.WidgetShortcut)
+        sc_copy.activated.connect(self.copy_tree_section)
+        sc_paste = QShortcut(QKeySequence.Paste, self.tree)
+        sc_paste.setContext(Qt.WidgetShortcut)
+        sc_paste.activated.connect(lambda: self.paste_tree_section('child'))
         # 导航树与常量框之间放可拖动分隔条：常量框高度可自由拉伸
         left_split = QSplitter(Qt.Vertical)
         left_split.setChildrenCollapsible(False)
@@ -3621,16 +3867,15 @@ class MainWindow(QMainWindow):
         self.work_pane = right
         main_split.addWidget(right)
 
-        # ===== 最右：分类汇总面板 =====
+        # ===== 分类汇总：V3.7.0 起不再停靠在右侧，改为弹窗（右键单元格即可打开）=====
         self.summary_panel = SummaryPanel(self)
-        main_split.addWidget(self.summary_panel)
+        self.summary_panel.setVisible(False)
 
         main_split.setStretchFactor(0, 0)
         main_split.setStretchFactor(1, 1)
-        main_split.setStretchFactor(2, 0)
         # 记住用户拖出来的宽度，收起 / 展开时复原
         self._nav_folded = False
-        self._sum_folded = False
+        self._sum_folded = True          # 汇总已是弹窗，视作“已收起”
         self._sum_max = False
         self._const_folded = False
         self._left_width = int(self.settings.value('main_left_w', 300) or 300)
@@ -3641,7 +3886,7 @@ class MainWindow(QMainWindow):
             self._sum_width = 300
         self._applying_sizes = True
         try:
-            main_split.setSizes([self._left_width, 1000, self._sum_width])
+            main_split.setSizes([self._left_width, 1400])
         finally:
             self._applying_sizes = False
         main_split.splitterMoved.connect(self._remember_split_widths)
@@ -3776,17 +4021,23 @@ class MainWindow(QMainWindow):
             return
         try:
             s = self.main_split.sizes()
-            if len(s) == 3:
+            if len(s) >= 2:
                 if s[0] >= 120:
                     self._left_width = s[0]
-                if s[2] >= 120:
-                    self._sum_width = s[2]
         except Exception:
             pass
 
     def _fold(self, which, hide):
         """统一收起 / 展开；用“折叠状态”标志判断，避免窗口未显示时 isVisible() 恒 False。"""
         attr = '_%s_folded' % which
+        if which == 'sum':
+            # V3.7.0：分类汇总已改成弹窗，“展开”就是把弹窗叫出来（可反复打开）
+            setattr(self, attr, bool(hide))
+            if hide:
+                self.close_summary_dialog()
+            else:
+                self.open_summary_dialog()
+            return True
         if hide == getattr(self, attr):
             return False
         setattr(self, attr, hide)
@@ -3794,12 +4045,6 @@ class MainWindow(QMainWindow):
             self.left_frame.setVisible(not hide)
             self.btn_nav_open.setVisible(hide)      # 收起后工作区左上角出现“展开导航”
             self._sync_main_sizes()
-        elif which == 'sum':
-            self.summary_panel.setVisible(not hide)
-            self.btn_sum_open.setVisible(hide)      # 收起后工作区右上角出现“展开汇总”
-            self._sync_main_sizes()
-            if not hide:
-                self.summary_panel.refresh()
         else:
             self.const_box.setVisible(not hide)
             self.const_strip.set_folded(hide)
@@ -3815,48 +4060,49 @@ class MainWindow(QMainWindow):
         self._fold('nav', hide)
 
     def fold_summary(self, hide=None):
-        """收起 / 展开右侧分类汇总面板。"""
+        """分类汇总：V3.7.0 起改为弹窗，这里负责打开 / 关闭弹窗。"""
         if hide is None:
-            hide = not self._sum_folded
-        if hide and getattr(self, '_sum_max', False):
-            self.toggle_summary_max(False)
-        if hide and not self._sum_folded and self.summary_panel.width() > 60:
-            self._sum_width = self.summary_panel.width()
-        self._fold('sum', hide)
+            hide = False          # 默认打开
+        self._fold('sum', bool(hide))
+
+    def open_summary_dialog(self):
+        """弹出“分类汇总”窗口（右键单元格、工具栏按钮都走这里）。
+
+        用非模态窗口：汇总开着也能继续编辑表格，关闭时窗口隐藏不销毁。
+        """
+        dlg = getattr(self, '_summary_dialog', None)
+        if dlg is not None:
+            try:
+                dlg.show()
+                dlg.raise_()
+                dlg.activateWindow()
+                dlg.panel.refresh()
+                return
+            except Exception:
+                self._summary_dialog = None
+        dlg = SummaryDialog(self)
+        self._summary_dialog = dlg
+        dlg.show()
+        dlg.raise_()
+
+    def close_summary_dialog(self):
+        dlg = getattr(self, '_summary_dialog', None)
+        if dlg is not None:
+            try:
+                dlg.hide()
+            except Exception:
+                pass
 
     def toggle_summary_max(self, on=None):
-        """放大 / 还原分类汇总：放大时隐藏左侧导航与工作区，汇总表占满窗口。"""
-        if on is None:
-            on = not getattr(self, '_sum_max', False)
-        on = bool(on)
-        if on == getattr(self, '_sum_max', False):
+        """放大 / 还原分类汇总弹窗。"""
+        dlg = getattr(self, '_summary_dialog', None)
+        if dlg is None:
             return
-        self._sum_max = on
+        on = (not dlg.isMaximized()) if on is None else bool(on)
         if on:
-            if self._sum_folded:               # 放大前先确保汇总面板可见
-                self._sum_folded = False
-                self.summary_panel.setVisible(True)
-                self.btn_sum_open.setVisible(False)
-            if self.summary_panel.width() > 60:
-                self._sum_width = self.summary_panel.width()
-            self.left_frame.setVisible(False)
-            self.work_pane.setVisible(False)
-            self.btn_nav_open.setVisible(False)
-            self.btn_sum_open.setVisible(False)
-            self.summary_panel.btn_max.setText('⤡')
-            self.summary_panel.btn_max.setToolTip('还原工作区')
-            self._sync_main_sizes()
-            self.summary_panel.refresh()
-            self.status.showMessage('分类汇总已放大：主工作区暂时隐藏', 3000)
+            dlg.showMaximized()
         else:
-            self.left_frame.setVisible(not self._nav_folded)
-            self.work_pane.setVisible(True)
-            self.btn_nav_open.setVisible(self._nav_folded)
-            self.btn_sum_open.setVisible(False)
-            self.summary_panel.btn_max.setText('⤢')
-            self.summary_panel.btn_max.setToolTip('放大分类汇总（隐藏主工作区）')
-            self._sync_main_sizes()
-            self.status.showMessage('已还原工作区', 2000)
+            dlg.showNormal()
 
     def fold_const(self, hide=None):
         """收起 / 展开左下常量框。"""
@@ -3867,28 +4113,19 @@ class MainWindow(QMainWindow):
         self._fold('const', hide)
 
     def _sync_main_sizes(self):
-        """左导航 / 工作区 / 汇总三块按记录宽度分配（窗口太窄时按比例让位）。"""
+        """左导航 / 工作区两块按记录宽度分配（窗口太窄时按比例让位）。"""
         total = self.main_split.width()
         if total < 480:
             return
-        if getattr(self, '_sum_max', False):
-            self._applying_sizes = True
-            try:
-                self.main_split.setSizes([0, 0, total])
-            finally:
-                self._applying_sizes = False
-            return
-        HANDLE = 1 * 2          # 两个 1px 细线分隔
+        HANDLE = 1                  # 一个 1px 细线分隔
         lw = self._left_width if not self._nav_folded else 0
-        sw = self._sum_width if not self._sum_folded else 0
         room = total - HANDLE - 260           # 留给工作区的最小空间
-        if room > 0 and lw + sw > room:
-            k = room / float(lw + sw)
-            lw, sw = int(lw * k), int(sw * k)
-        ww = max(160, total - lw - sw - HANDLE)
+        if room > 0 and lw > room:
+            lw = int(room)
+        ww = max(160, total - lw - HANDLE)
         self._applying_sizes = True
         try:
-            self.main_split.setSizes([lw, ww, sw])
+            self.main_split.setSizes([lw, ww])
         finally:
             self._applying_sizes = False
 
@@ -4003,12 +4240,16 @@ class MainWindow(QMainWindow):
     def on_ribbon_tab(self, btn):
         name = btn.text()
         self.ribbon.show_page(name)
-        mapping = {'计算书编辑': 0, '公式编辑': 0, '数据输出': 1, '关于产品': 2}
+        mapping = {'计算书编辑': 0, '公式编辑': 0, '数据导出': 1, '数据输出': 1, '关于产品': 2}
         idx = mapping.get(name, 0)
-        self.tabs.setCurrentIndex(idx)
         if idx == 1:
-            self.print_preview()
-        elif idx == 2:
+            # V3.7.0：数据导出页一进来先弹“查看报表”（表格化的工程量报表），
+            # 打印预览不再是进入该页的第一件事，改由 Ribbon 上的「打印预览」按钮调用。
+            self.tabs.setCurrentIndex(0)
+            self.view_report()
+            return
+        self.tabs.setCurrentIndex(idx)
+        if idx == 2:
             self.show_formula_help()
 
     def help_html(self):
@@ -4022,25 +4263,33 @@ class MainWindow(QMainWindow):
         <li>点工具栏「新建」，填写工程名称（必填）、建设单位、施工单位、设计单位、编制日期等，确定后即创建工程。</li>
         <li>在左侧树右键「新建分部 / 新建子分部」建立层级，再在表格逐行填写编号、项目名称、部位、计算公式、单位、备注。</li>
         <li>公式写完自动算出工程量，每个分部自动汇总「小计」；勾选「不计」的行不参与汇总。</li>
-        <li>点「保存」生成 <code>.gcls</code> 工程文件；点「导出Excel表格」生成 xlsx，WPS / Excel 都能打开。</li>
+        <li>点「保存」生成 <code>.gcls</code> 工程文件；点「数据导出 →「导出表格」」生成 xlsx，WPS / Excel 都能打开；点「查看报表」先看表格化的工程量报表再打印。</li>
         </ul>
 
         <h3 style="color:#2f5597;">二、界面布局与标题栏</h3>
         <ul>
         <li>最上面是自绘标题栏：左端显示<b>橘黄底的软件图标</b> → 软件名与版本 → 工程文件名称 → <code>[文件存放详细地址]</code>；不再显示常用函数快捷按钮；最右端是最小化 / 最大化 / 关闭。未保存的工程显示 <code>[未保存]</code>。</li>
         <li>标题栏空白处按住可拖动窗口，双击最大化 / 还原；鼠标移到窗口边缘可拖拽调整大小。路径过长时中间省略，鼠标悬停可看全路径。</li>
-        <li>Ribbon 三个页签：<b>计算书编辑</b>（文件、编辑、格式、计算书等）、<b>数据输出</b>（导出、打印、打印预览、页面设置）、<b>关于产品</b>（使用说明、关于产品）。<b>「公式编辑」页签已取消</b>，所有内置函数改由标题栏快捷按钮与「插入函数」面板调用；「查看公式」「重算」按钮也已取消；F4–F7 插入括号的快捷键仍可用。</li>
-        <li>左侧为项目结构树与常量框，中间为公式辅助框、快捷操作行和工作区表格，右侧为分类汇总面板。各面板分割条上有小箭头按钮可收起 / 展开（宽度会被记住）；汇总标题行的「⤢」可隐藏主工作区、放大查看汇总，再点「⤡」还原。</li>
+        <li>Ribbon 三个页签：<b>计算书编辑</b>、<b>数据导出</b>、<b>关于产品</b>。「计算书编辑」按成熟工程量软件的版面分为 <b>文件 / 编辑 / 层级 / 剪贴板 / 表格 / 选项</b> 六组：文件（新建、打开、保存、另存为、最近打开、备份目录、导入表格）；编辑（项目选项、插入计算式 F9、添加计算式、插入明细、插入分部、添加分部、用分部打新）；层级（上移、下移、升级、降级、特殊字符、注释标签）；剪贴板（复制、剪切、删除、粘贴、恢复、撤销）；表格（查找替换、层级设置、表格字体、格式刷、排序、筛选、清除筛选）；选项（选项配置）。<b>「公式编辑」页签已取消</b>，内置函数改由「插入函数」面板调用；「查看公式」「重算」按钮也已取消；F4–F7 插入括号的快捷键仍可用。</li>
+        <li>左侧为项目结构树与常量框，右侧为公式辅助框、快捷操作行和工作区表格。分割条上有小箭头按钮可收起 / 展开（宽度会被记住）。<b>分类汇总不再是右侧常驻面板，改为弹窗</b>：在单元格里右键 →「分类汇总…」即可弹出（汇总开着也能继续编辑表格）。</li>
         </ul>
 
         <h3 style="color:#2f5597;">三、项目结构与层级</h3>
         <ul>
         <li>导航栏只显示节点「名称」，不再单列显示层级文字；第一级固定是<b>单项工程</b>（默认“单项工程1”，不可删除），往下依次为<b>单位工程 / 分部工程 / 分项工程</b>，可继续往下加，超过四级沿用最后一级名称。内部层级关系照常保留（新建、升级、降级、汇总不受影响），鼠标悬停节点可看到该节点的层级名。</li>
         <li>工具栏「层级设置」可改名、增删层级（例如改成 标段 / 单位工程 / 分部 / 分项）；新建节点自动使用下一级名称，如“分部工程2”。</li>
-        <li>树右键：新建单项工程 / 新建下一级 / 新建同级 / 重命名 / 上移 / 下移 / 升级 / 降级 / 删除 / 层级设置 / 工程信息。右键会先选中该节点，不可用的项变灰；删除后可用 Ctrl+Z 撤销。</li>
+        <li>树右键：新建单项工程 / 新建下一级 / 新建同级 / 重命名 / 上移 / 下移 / 升级 / 降级 / 删除 / <b>复制本节点 / 粘贴为下级节点 / 粘贴为同级节点</b> / 层级设置 / 工程信息。右键会先选中该节点，不可用的项变灰；删除后可用 Ctrl+Z 撤销。</li>
+        <li><b>节点复制粘贴（V3.7.0）</b>：计算书、单项工程、单位工程、分部工程、分项工程<b>任意层级</b>都能自由复制。右键「复制本节点」把该节点连同<b>全部下级节点和数据行</b>一起复制；换到别的节点上右键「粘贴为下级节点」或「粘贴为同级节点」即可粘贴，重名会自动加序号（如“单位工程1(2)”），粘贴出来的节点 id 全新、互不影响；树里按 Ctrl+C / Ctrl+V 同样可以复制粘贴。</li>
         </ul>
 
-        <h3 style="color:#2f5597;">四、表格录入与编辑</h3>
+        <h3 style="color:#2f5597;">四、项目选项与选项配置（V3.7.0 新增）</h3>
+        <ul>
+        <li><b>项目选项</b>（Ribbon「编辑」组）：填写 <b>工程名称 / 编制单位 / 编制人</b>，只读的<b>创建时间</b>自动带出；「数据配置」里可设 <b>工程量精度</b>（小数位数），并可 <b>设置 / 更改密码</b>（密码只存哈希、不存明文；以后打开这个工程会先要密码）。</li>
+        <li><b>选项配置</b>（Ribbon「选项」组）：<b>回车键效果</b>（向下 / 向右）决定回车后光标走向；<b>显示配置</b>可调表格<b>字体大小</b>、并可<b>加宽括号</b>（显示时把 ( ) [ ] 换成全角，方便阅读，不改动数据）；<b>注释设置</b>可点「点击设置」改<b>注释颜色</b>（作用在备注列）和<b>变量自动值</b>（给变量预设默认取值）；<b>定时</b>设自动保存周期（分钟）；<b>分部</b>设新建分部时预置的<b>默认计算式个数</b>；<b>快速启动</b>可开「自动打开上次编辑工程」和「记住上次关闭窗口大小及位置」；<b>特殊符号</b>里可「编辑特殊字符」「编辑注释标签」。</li>
+        <li><b>编辑辅助功能</b>共 11 个开关，可逐项开 / 关：<b>分部单位自动应用到计算式</b>（分部名以单位结尾，如“回填土 m3”，新建计算式自动带单位）、<b>* 号自动翻译为 ×</b>、<b>/ 号自动翻译为 ÷</b>、<b>+ 号自动翻译为 ＋</b>、<b>- 号自动翻译为 －</b>、<b>[] 自动翻译为 {}（兼容GBQ）</b>、<b>显示辅助计算书公式窗口</b>、<b>默认展开Ribbon菜单</b>、<b>粘贴时自动识别◇注释(GCL)</b>（◇ 后面的内容自动转进备注列）、<b>自动显示引用代码工程量注释</b>（备注里提到别的行编号时，鼠标停上去能看到被引用的工程量）、<b>分部按层级显示不同颜色</b>。</li>
+        </ul>
+
+        <h3 style="color:#2f5597;">五、表格录入与编辑</h3>
         <ul>
         <li><b>公式辅助框</b>：只在「计算公式」列生效。选中公式列单元格时公式同步显示在上方辅助框并着色；在表格里逐字输入会立即同步到辅助框，在辅助框输入也会实时更新到单元格和工程量。按 Ctrl+Enter 确认。</li>
         <li><b>单位与小数位</b>：单位列是下拉框（可滚动选择，也可直接输入自定义单位），内置 m、m2、m3、kg、t、个、块、套、处、台、组、根、樘、座、件、项、台班、延长米、千块等。工程量小数位按单位自动决定：m / m2 / m3 / kg 保留 2 位，t 保留 3 位，个 / 块 / 套 / 处 / 台 / 组 取整，其他单位默认 3 位；表格、打印、Excel 导出口径一致。</li>
@@ -4056,7 +4305,7 @@ class MainWindow(QMainWindow):
         <li><b>默认列与列宽（V3.6）</b>：默认列顺序为 序号 / 编号 / 项目名称 / 单位 / 工程量 / 计算公式 / 图纸编号 / 大样图来源 / 不计 / 备注，宽度依次 80 / 135 / 340 / 80 / 100 / 600 / 150 / 150 / 80 / 200。列宽默认固定，新增列或刷新表格不会打乱已调好的宽度；表头右键可增删 / 重命名列、设置列宽（工具栏「数据列定义」按钮已取消）。<b>序号 / 编号 / 单位 / 工程量以及新增列默认居中对齐</b>，仍可右键单独改对齐。</li>
         </ul>
 
-        <h3 style="color:#2f5597;">五、公式与函数</h3>
+        <h3 style="color:#2f5597;">六、公式与函数</h3>
         <ul>
         <li><b>基本运算</b>：+ - * / 与 × ÷ 均可，幂用 ^，如 <code>2^3</code>、<code>4×9.6×0.1</code>；支持上标 ² ³ 直接当乘方，如 <code>3³=27</code>。</li>
         <li><b>注释</b>：公式中的汉字、<code>[方括号]</code>、<code>{花括号}</code>内容自动忽略，如 <code>4×9.6[柱基预埋]</code> 只计算 4×9.6；方括号常用于写备注。</li>
@@ -4067,22 +4316,24 @@ class MainWindow(QMainWindow):
         <li><b>汇总与配色</b>：每个分部自动「小计」（XJ 子分部汇总函数已取消，旧工程中的 XJ() 公式仍可正常计算）。公式列与辅助框用同一套配色：数字红、运算符黑、<code>[备注]</code>深绿、汉字淡绿、@常量紫、上标蓝，便于核对。</li>
         </ul>
 
-        <h3 style="color:#2f5597;">六、打印与导出</h3>
+        <h3 style="color:#2f5597;">七、打印与导出</h3>
         <ul>
         <li><b>打印 / 预览</b>：Ctrl+P 调出系统打印对话框，可选打印机、份数、页码范围，也可选“Microsoft Print to PDF”存成 PDF。「打印预览」按纸张实际比例分页显示，鼠标拖动页面上的蓝色虚线即可调整页边距，上方数值框同步更新；预览与实际打印的分页完全一致，<b>每页都会重复报表标题和表头行</b>。</li>
         <li><b>页面设置</b>：可设表头标题、页眉、<b>页脚左 / 中 / 右三栏</b>（一般放编制人、复核人、日期等签字信息）、上 / 下 / 左 / 右页边距、纸张方向、纸张大小（下拉列出系统打印机支持的纸型，选“自定义”可填宽高 mm）、水平 / 垂直对齐。打印和预览每页底部自动显示「第 X 页，共 Y 页」，无需手动填页码。</li>
         <li><b>打印区域</b>：在表格里框选单元格后<b>右键 →「设置打印区域」</b>，报表只输出选中的行列，小计也只算选中行；右键「清除打印区域」恢复打印整张计算书。快捷操作行的「打印选中区域」也可直接使用。</li>
-        <li><b>导出</b>：「导出Excel表格 / 导出WPS表格」生成 .xlsx，包含各计算书与常量表；页面设置中的页脚三栏和自动页码也会写入导出文件。</li>
+        <li><b>查看报表（V3.7.0）</b>：点「数据导出」页签或 Ribbon 的<b>「查看报表」</b>，弹出<b>表格化的工程量报表</b>：左边是计算书 / 单位 / 分部 / 分项的层级树，右边是编号、项目名称、单位、工程量、计算公式、图纸编号、备注，每个节点后面带合计，整体还有总计。<b>先在这里核对数据，确认没问题再打印或导出</b>，不用一进来就跳到打印预览。窗口底部可直接「刷新 / 打印 / 导出表格 / 页面设置」。</li>
+        <li><b>导出</b>：Ribbon「导出表格」生成 .xlsx（WPS / Excel 都能打开），包含各计算书与常量表；页面设置中的页脚三栏和自动页码也会写入导出文件。</li>
         </ul>
 
-        <h3 style="color:#2f5597;">七、分类汇总</h3>
+        <h3 style="color:#2f5597;">八、分类汇总</h3>
         <ul>
-        <li>右侧面板可按 <b>编号 / 项目名称 / 部位 / 分部 / 单位</b> 把计算数据分类合计，同名同单位的多行自动累加；勾「仅当前分部（含下级）」只统计左侧选中分部，点「刷新」重算，「导出」存 Excel，「复制」可直接贴到 WPS。</li>
+        <li><b>分类汇总改为弹窗（V3.7.0）</b>：不再常驻右侧，<b>在单元格里右键 →「分类汇总…」</b>即可弹出（Ribbon「数据汇总」按钮同样可以调出）。弹窗是非模态的，汇总开着也能继续编辑表格，关掉再开数据还在。</li>
+        <li>弹窗里可按 <b>编号 / 项目名称 / 部位 / 分部 / 单位</b> 把计算数据分类合计，同名同单位的多行自动累加；勾「仅当前分部（含下级）」只统计左侧选中分部，点「刷新」重算，「导出」存 Excel，「复制」可直接贴到 WPS。</li>
         <li>点「多条件…」可用多字段分组（如「部位 + 单位」组合）和多条筛选（字段 + 包含 / 不包含 / 等于 / 不等于 / 为空 / 不为空 + 关键词），条件之间可选满足全部（AND）或满足任一（OR）；点「单条件」切回。</li>
-        <li>汇总表单元格可多选并按 Ctrl+C 复制；所有列宽均可直接拖动（含项目名称列）并被记住，表头 / 角标 / 单元格右键可设列宽、行高、自适应、复制整表、导出；标题行「⤢ / ⤡」可放大汇总或还原。</li>
+        <li>汇总表单元格可多选并按 Ctrl+C 复制；所有列宽均可直接拖动（含项目名称列）并被记住，表头 / 角标 / 单元格右键可设列宽、行高、自适应、复制整表、导出。</li>
         </ul>
 
-        <h3 style="color:#2f5597;">八、其他功能与快捷键</h3>
+        <h3 style="color:#2f5597;">九、其他功能与快捷键</h3>
         <ul>
         <li><b>自动保存与备份</b>：「计算书」组「选项配置」里可设自动保存开关、间隔（1–120 分钟）和备份目录；<b>默认备份目录为 <code>D:\手算工程量计算书\bak</code></b>（不再跟随工程文件目录），软件启动时会检查并自动创建该文件夹，创建失败会提示你手动指定；到点时若工程有改动会写回主文件，并在备份目录生成带时间戳的副本。</li>
         <li><b>工程文件</b>：保存为 <code>.gcls</code>（内容仍是 JSON 文本，便于排查），包含所有计算书、分部结构、公式、备注、常量、列定义、填充色与页面设置；旧版 .json 工程也能打开。<b>软件启动不再自动打开上次的工程</b>（每次都是空白工程，保护隐私、避免误改），需要时请用「打开」或从「最近打开」选择；双击 <code>.gcls</code> 文件仍可直接打开对应工程。</li>
@@ -4097,8 +4348,11 @@ class MainWindow(QMainWindow):
         self._loading = True
         self.tree.clear()
         proj = self.project
+        # V3.7.0：分部按层级显示不同颜色（选项配置 → 编辑辅助功能）
+        level_colors = self.opt('level_colors', True)
+        palette = ['#1f3864', '#1f6f4a', '#9c4a1a', '#5b2a86', '#7a5c00', '#215b6b']
 
-        def add(sec, parent_item, is_book=False):
+        def add(sec, parent_item, is_book=False, depth=0):
             it = QTreeWidgetItem([sec.name])
             it.setData(0, Qt.UserRole, sec.id)
             it.setData(0, Qt.UserRole + 1, 'book' if is_book else 'section')
@@ -4107,18 +4361,20 @@ class MainWindow(QMainWindow):
             if is_book:
                 # 导航栏统一用常规字体（不加粗），单项工程用 ▣ 前缀区分
                 it.setText(0, '▣ ' + sec.name)
+            if level_colors:
+                it.setForeground(0, QBrush(QColor(palette[depth % len(palette)])))
             if parent_item:
                 parent_item.addChild(it)
             else:
                 self.tree.addTopLevelItem(it)
             for c in sec.children:
-                add(c, it)
+                add(c, it, depth=depth + 1)
             return it
 
         # 顶级显示所有单项工程
         first_item = None
         for book in proj.books:
-            bi = add(book, None, is_book=True)
+            bi = add(book, None, is_book=True, depth=0)
             if first_item is None:
                 first_item = bi
         # 恢复当前选中项（按 id 找回）
@@ -4252,6 +4508,12 @@ class MainWindow(QMainWindow):
                             it.setToolTip(row.error)
                         self._apply_item_font(it, row, key)
                         self._apply_item_align(it, row, key)
+                        # V3.7.0：注释颜色（选项配置 → 注释设置）作用到备注列
+                        if key == 'remark':
+                            it.setForeground(QColor(self.opt('note_color', '#008000')))
+                            tip = self._ref_code_tip(row, sec)
+                            if tip:
+                                it.setToolTip(tip)
                     bg = self.row_fill_for(row, cd)
                     if bg:
                         it.setBackground(QBrush(QColor(bg)))
@@ -4633,13 +4895,23 @@ class MainWindow(QMainWindow):
                 key = cols[c]['key']
                 if key == 'value':
                     continue
+                val = val.rstrip()
+                # V3.7.0：粘贴时自动识别 ◇注释(GCL) —— ◇ 之后的内容转到“备注”列
+                if '◇' in val and key != 'remark' and self.opt('paste_gcl', True):
+                    head, _, tail = val.partition('◇')
+                    val = head.rstrip()
+                    tail = tail.strip()
+                    if tail and any(cc['key'] == 'remark' for cc in cols):
+                        row = sec.rows[r]
+                        old = (getattr(row, 'remark', '') or '')
+                        row.remark = (old + ' ' if old else '') + tail
                 if key == 'no_count':
                     row = sec.rows[r]
                     row.no_count = val.strip() == '是'
                 elif hasattr(sec.rows[r], key):
-                    setattr(sec.rows[r], key, val.rstrip())
+                    setattr(sec.rows[r], key, val)
                 else:
-                    sec.rows[r].custom[key] = val.rstrip()
+                    sec.rows[r].custom[key] = val
         self._loading = False
         self.project.recalc()
         self.refresh_table()
@@ -4728,6 +5000,7 @@ class MainWindow(QMainWindow):
         name = self.project.new_child_name(parent)
         self.push_undo('新建' + self.project.next_level_of(parent))
         new = Section(name, parent)
+        self._apply_default_rows(new)
         try:
             idx = parent.children.index(sec) + 1
         except ValueError:
@@ -4747,6 +5020,7 @@ class MainWindow(QMainWindow):
         label = self.project.next_level_of(sec)
         self.push_undo('新建' + label)
         new = sec.add_child(name)
+        self._apply_default_rows(new)
         sec.expanded = True
         self.refresh_tree()
         self.select_section(new)
@@ -5027,6 +5301,102 @@ class MainWindow(QMainWindow):
             self.refresh_table()
             self._dirty = True
 
+    # ---------------- 项目结构：节点复制 / 粘贴 ----------------
+    def _clone_section(self, sec, parent=None):
+        """深拷贝一个树节点（含下级节点与全部数据行），并重新生成 id。"""
+        new = Section(sec.name, parent)
+        new.expanded = getattr(sec, 'expanded', True)
+        new.rows = []
+        for r in getattr(sec, 'rows', []) or []:
+            nr = Row.from_dict(r.to_dict())
+            nr.id = new_id()
+            new.rows.append(nr)
+        new.children = [self._clone_section(c, new) for c in getattr(sec, 'children', []) or []]
+        return new
+
+    def _section_to_text(self, sec, level=0):
+        """节点转成带缩进的纯文本，方便贴到别处看。"""
+        lines = ['%s%s' % ('　' * level, sec.name)]
+        for c in getattr(sec, 'children', []) or []:
+            lines.extend(self._section_to_text(c, level + 1))
+        for r in getattr(sec, 'rows', []) or []:
+            lines.append('%s- %s %s %s' % ('　' * (level + 1), r.code or '',
+                                           r.name or '', r.formula or ''))
+        return lines
+
+    def copy_tree_section(self, *args):
+        """复制当前节点（计算书 / 单项 / 单位 / 分部 / 分项 都可以）。"""
+        sec = self._tree_section()
+        if sec is None:
+            self.status.showMessage('请先在项目结构里选中要复制的节点', 3000)
+            return
+        self._clip_section = self._clone_section(sec)
+        try:
+            QApplication.clipboard().setText('\n'.join(self._section_to_text(sec)))
+        except Exception:
+            pass
+        self.status.showMessage('已复制%s「%s」（含下级与数据行），'
+                                '可在任意节点上右键“粘贴”'
+                                % (self.project.level_of(sec), sec.name), 6000)
+
+    def paste_tree_section(self, mode='child'):
+        """把复制的节点粘贴为下级（child）或同级（sibling）。"""
+        clip = getattr(self, '_clip_section', None)
+        if clip is None:
+            self.status.showMessage('剪贴板里没有可粘贴的节点（请先“复制”）', 3000)
+            return
+        sec = self._tree_section()
+        if sec is None:
+            sec = self.project.root
+        new = self._clone_section(clip)
+        self.push_undo('粘贴节点')
+        if mode == 'sibling':
+            if self.project.is_book(sec):
+                # 计算书同级 → 追加到计算书列表末尾
+                new.parent = None
+                new.name = self._unique_book_name(new.name)
+                self.project.books.append(new)
+            else:
+                parent = sec.parent
+                if parent is None:
+                    self.status.showMessage('该节点没有上级，无法按同级粘贴', 3000)
+                    return
+                new.parent = parent
+                new.name = self._unique_child_name(parent, new.name)
+                try:
+                    idx = parent.children.index(sec) + 1
+                except ValueError:
+                    idx = len(parent.children)
+                parent.children.insert(idx, new)
+        else:
+            parent = sec
+            new.parent = parent
+            new.name = self._unique_child_name(parent, new.name)
+            parent.children.append(new)
+            parent.expanded = True
+        self.project.recalc()
+        self.refresh_tree()
+        self.select_section(new)
+        self._dirty = True
+        self.status.showMessage('已粘贴%s「%s」' % (self.project.level_of(new), new.name), 4000)
+
+    def _unique_book_name(self, name):
+        used = [b.name for b in self.project.books]
+        return self._pick_free_name(name, used)
+
+    def _unique_child_name(self, parent, name):
+        used = [c.name for c in parent.children]
+        return self._pick_free_name(name, used)
+
+    @staticmethod
+    def _pick_free_name(name, used):
+        if name not in used:
+            return name
+        i = 2
+        while ('%s(%d)' % (name, i)) in used:
+            i += 1
+        return '%s(%d)' % (name, i)
+
     def tree_menu(self, pos):
         # 右键时先选中鼠标指向的项，确保操作针对该项本身
         item = self.tree.itemAt(pos)
@@ -5080,6 +5450,15 @@ class MainWindow(QMainWindow):
             menu.addAction('删除%s' % level, self.delete_section)
         # 工具栏不再放“工程信息”按钮，改到树右键里，需要改时随时能改
         menu.addSeparator()
+        menu.addAction('复制本节点（含下级与数据）', self.copy_tree_section)
+        act_paste_child = menu.addAction('粘贴为下级节点', lambda: self.paste_tree_section('child'))
+        act_paste_sib = menu.addAction('粘贴为同级节点', lambda: self.paste_tree_section('sibling'))
+        has_clip = getattr(self, '_clip_section', None) is not None
+        act_paste_child.setEnabled(has_clip)
+        act_paste_sib.setEnabled(has_clip)
+        act_paste_child.setToolTip('复制后可用' if has_clip else '请先复制一个节点')
+        act_paste_sib.setToolTip('复制后可用' if has_clip else '请先复制一个节点')
+        menu.addSeparator()
         menu.addAction('层级设置（自定义各层名称）…', self.level_setup)
         menu.addAction('工程信息设置…', self.edit_info)
         menu.exec_(self.tree.mapToGlobal(pos))
@@ -5098,7 +5477,11 @@ class MainWindow(QMainWindow):
         if row < 0 or row > len(self.current_section.rows):
             row = len(self.current_section.rows)
         self.push_undo('插入行')
-        self.current_section.rows.insert(row, Row())
+        new_row = Row()
+        unit = self._auto_unit_for(self.current_section)
+        if unit:
+            new_row.unit = unit
+        self.current_section.rows.insert(row, new_row)
         self.project.recalc()
         self.refresh_table()
         self._dirty = True
@@ -5205,6 +5588,8 @@ class MainWindow(QMainWindow):
         menu = QMenu(self)
         menu.addAction('复制选中单元格  (Ctrl+C)', self.copy_cells)
         menu.addAction('全选表格', self.table.selectAll)
+        menu.addSeparator()
+        menu.addAction('分类汇总…（按编号/名称/部位/分部/单位合计）', self.data_summary)
         menu.addSeparator()
         menu.addAction('在上方插入行', self.insert_row_above)
         menu.addAction('在下方插入行', self.insert_row_below)
@@ -6823,6 +7208,9 @@ class MainWindow(QMainWindow):
         self._font_size = pt
         self._set_setting('table_font_family', family)
         self._set_setting('table_font_size', pt)
+        # V3.7.0：与「选项配置 → 显示配置 → 字体大小」保持一致
+        self.options['font_size'] = pt
+        self._save_json('options_json', self.options)
         self._apply_table_font(family, pt)
         self.status.showMessage('表格字体已设为 %s %d 号' % (family, pt), 3000)
 
@@ -7739,21 +8127,331 @@ class MainWindow(QMainWindow):
         dlg.exec_()
 
     def data_summary(self):
-        """分类汇总：打开右侧汇总面板（按编号 / 项目名称 / 部位 / 分部 / 单位）。"""
-        if self._sum_folded:
-            self.fold_summary(False)
+        """分类汇总：V3.7.0 起改为弹窗（右键单元格也能调出来）。"""
         self.tabs.setCurrentIndex(0)
-        self.summary_panel.refresh()
-        n = len(self.summary_panel._groups)
-        if n == 0:
-            self.status.showMessage('当前范围没有可汇总的数据（检查是否都勾了“不计”）', 5000)
+        self.fold_summary(False)
+
+    # ================= V3.7.0：项目选项 / 选项配置 / 报表 =================
+    def open_backup_dir(self, *args):
+        """打开备份目录（默认 D:\\手算工程量计算书\\bak）。"""
+        d = self.autosave_dir or DEFAULT_BACKUP_DIR
+        try:
+            os.makedirs(d, exist_ok=True)
+        except Exception as e:
+            QMessageBox.warning(self, APP_NAME,
+                                '备份目录无法创建：\n%s\n\n请在“选项配置”里换一个目录。' % e)
+            return
+        try:
+            os.startfile(d)
+            self.status.showMessage('已打开备份目录：' + d, 4000)
+        except Exception as e:
+            QMessageBox.information(self, APP_NAME,
+                                    '备份目录：\n%s\n\n（无法自动打开：%s）' % (d, e))
+
+    def _ask_project_password(self, digest):
+        """打开带密码的工程时索要密码（最多试 3 次）。"""
+        for _ in range(3):
+            dlg = QDialog(self)
+            dlg.setWindowTitle('请输入工程密码')
+            dlg.setMinimumWidth(360)
+            f = QFormLayout(dlg)
+            ed = QLineEdit()
+            ed.setEchoMode(QLineEdit.Password)
+            f.addRow('密码：', ed)
+            bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+            bb.button(QDialogButtonBox.Ok).setText('确定')
+            bb.button(QDialogButtonBox.Cancel).setText('取消')
+            bb.accepted.connect(dlg.accept)
+            bb.rejected.connect(dlg.reject)
+            f.addRow(bb)
+            ed.setFocus()
+            if dlg.exec_() != QDialog.Accepted:
+                return False
+            if check_password(ed.text(), digest):
+                return True
+            QMessageBox.warning(self, APP_NAME, '密码不正确，请重试。')
+        return False
+
+    def project_options(self, *args):
+        """项目选项：工程名称 / 编制单位 / 编制人 / 工程量精度 / 密码。"""
+        dlg = ProjectOptionsDialog(self.project, self)
+        if dlg.exec_() != QDialog.Accepted:
+            return
+        dlg.apply()
+        self.precision = dlg.sp_precision.value()
+        self._set_setting('precision', self.precision)
+        self.update_title()
+        self.update_file_info()
+        self.refresh_table()
+        self._dirty = True
+        self.status.showMessage('项目选项已保存', 3000)
+
+    def option_config(self, *args):
+        """选项配置：回车键效果、显示、注释、定时、快速启动、编辑辅助功能等。"""
+        dlg = OptionConfigDialog(self.options, self)
+        if dlg.exec_() != QDialog.Accepted:
+            return
+        opt = dlg.result_options()
+        labels = dlg.labels()
+        if labels != self.annotation_labels:
+            self.annotation_labels = labels
+            self._save_json('annotation_labels', labels)
+        syms = list(getattr(self, 'custom_symbols', []) or [])
+        self.save_options(opt)
+        self._save_json('custom_symbols', syms)
+        self.apply_option_effects()
+        self.status.showMessage('选项配置已保存', 3000)
+
+    def view_report(self, *args):
+        """查看报表：先看表格化的报表，确认后再打印或导出表格。"""
+        dlg = ReportViewerDialog(self, self)
+        dlg.exec_()
+
+    # ---------------- 计算式 / 节点的增删（Ribbon“编辑”组）----------------
+    def add_row_at_end(self, *args):
+        """添加计算式：在当前分部末尾追加一行。"""
+        sec = self.current_section
+        if sec is None:
+            return
+        self.push_undo('添加计算式')
+        row = Row()
+        unit = self._auto_unit_for(sec)
+        if unit:
+            row.unit = unit
+        sec.rows.append(row)
+        self.project.recalc()
+        self.refresh_table()
+        self._dirty = True
+        r = len(sec.rows) - 1
+        if r >= 0:
+            self.table.setCurrentCell(r, 0)
+        self.status.showMessage('已在末尾添加一行计算式', 2500)
+
+    def _apply_default_rows(self, sec):
+        """新建节点时按「选项配置 → 分部 → 默认计算式个数」预置空行。"""
+        n = int(self.opt('default_rows', 1) or 0)
+        unit = self._auto_unit_for(sec)
+        for _ in range(max(0, n)):
+            r = Row()
+            if unit:
+                r.unit = unit
+            sec.rows.append(r)
+
+    def insert_child_section(self, *args):
+        """插入明细：在当前节点下最前面插入一个下一级节点。"""
+        sec = self._tree_section()
+        if sec is None:
+            return
+        label = self.project.next_level_of(sec)
+        name = self.project.new_child_name(sec)
+        self.push_undo('插入' + label)
+        new = Section(name, sec)
+        self._apply_default_rows(new)
+        sec.children.insert(0, new)
+        sec.expanded = True
+        self.project.recalc()
+        self.refresh_tree()
+        self.select_section(new)
+        self._dirty = True
+        self.status.showMessage('已插入%s「%s」' % (label, new.name), 3000)
+
+    def _section_level_depth(self, sec):
+        """插入/添加“分部”时用的层级深度。
+
+        在单位工程下 → 直接插分部工程；已经在分部工程或更深 → 用下一级
+        （保证节点的层级名和它在树里的实际深度始终一致）。
+        """
+        d = 0 if sec.parent is None else sec.depth()
+        if d == 1:
+            return 2            # 单位工程 → 分部工程
+        return d + 1
+
+    def _insert_level_section(self, sec, at_end=False):
+        """在 sec 下插入一个分部层级的节点（at_end=True 时追加到末尾）。"""
+        depth = self._section_level_depth(sec)
+        label = self.project.level_name(depth)
+        used = [c.name for c in sec.children]
+        name = self.project._pick_name(label, used)
+        self.push_undo(('添加' if at_end else '插入') + label)
+        new = Section(name, sec)
+        self._apply_default_rows(new)
+        if at_end:
+            sec.children.append(new)
         else:
-            self.status.showMessage('分类汇总已更新：%d 项（可切换汇总方式，或点“导出”存 Excel）'
-                                    % n, 6000)
+            sec.children.insert(0, new)
+        sec.expanded = True
+        self.project.recalc()
+        self.refresh_tree()
+        self.select_section(new)
+        self._dirty = True
+        self.status.showMessage('已%s%s「%s」' % ('添加' if at_end else '插入',
+                                              label, new.name), 3000)
+
+    def insert_section_node(self, *args):
+        """插入分部：在当前节点下最前面插入一个分部层级的节点。"""
+        sec = self._tree_section()
+        if sec is None:
+            return
+        self._insert_level_section(sec, at_end=False)
+
+    def add_section_node(self, *args):
+        """添加分部：在当前节点下末尾追加一个分部层级的节点。"""
+        sec = self._tree_section()
+        if sec is None:
+            return
+        self._insert_level_section(sec, at_end=True)
+
+    def duplicate_section(self, *args):
+        """用分部打新：以当前节点为模板复制一份（内容含下级与数据行）。"""
+        sec = self._tree_section()
+        if sec is None:
+            return
+        new = self._clone_section(sec)
+        self.push_undo('用分部打新')
+        if self.project.is_book(sec):
+            new.parent = None
+            new.name = self._unique_book_name(new.name)
+            self.project.books.append(new)
+        else:
+            parent = sec.parent
+            if parent is None:
+                self.status.showMessage('该节点没有上级，无法打新', 3000)
+                return
+            new.parent = parent
+            new.name = self._unique_child_name(parent, new.name)
+            try:
+                idx = parent.children.index(sec) + 1
+            except ValueError:
+                idx = len(parent.children)
+            parent.children.insert(idx, new)
+        self.project.recalc()
+        self.refresh_tree()
+        self.select_section(new)
+        self._dirty = True
+        self.status.showMessage('已按「%s」打新：%s' % (sec.name, new.name), 3000)
+
+    def insert_annotation_label(self, *args):
+        """注释标签：往当前行的备注里插入一个注释标记。"""
+        labels = list(self.annotation_labels or [])
+        menu = QMenu(self)
+        if labels:
+            for lab in labels:
+                menu.addAction('[%s]' % lab,
+                               lambda checked=False, l=lab: self._append_note_tag(l))
+            menu.addSeparator()
+        menu.addAction('自定义标签…', self.insert_note_tag)
+        menu.exec_(QCursor.pos())
+
+    def _append_note_tag(self, label):
+        row = self.table.currentRow()
+        if row < 0 or row >= len(self.current_section.rows):
+            QMessageBox.information(self, APP_NAME, '请先选中一行。')
+            return
+        self.push_undo('注释标签')
+        r = self.current_section.rows[row]
+        tag = '[%s]' % label
+        r.remark = (r.remark + ' ' if r.remark else '') + tag
+        self.refresh_table()
+        self._dirty = True
+        self.status.showMessage('已插入注释标签 %s' % tag, 2500)
+
+    # ---------------- 选项的即时效果 ----------------
+    def ensure_cell_filter(self, delegate=None):
+        """拿到（并缓存）单元格编辑器的事件过滤器。"""
+        f = getattr(self, '_cell_filter', None)
+        if f is None:
+            f = CellEditorFilter(self, delegate, self)
+            self._cell_filter = f
+        elif delegate is not None:
+            f.delegate = delegate
+        return f
+
+    def set_helper_visible(self, on=True):
+        """显示 / 隐藏公式辅助输入栏。"""
+        dock = getattr(self, 'formula_dock', None)
+        if dock is None:
+            return
+        dock.setVisible(bool(on))
+
+    def set_ribbon_expanded(self, on=True):
+        """展开 / 收起 Ribbon 的按钮区（只保留页签行）。"""
+        r = getattr(self, 'ribbon', None)
+        if r is None:
+            return
+        try:
+            r.set_expanded(bool(on))
+        except Exception:
+            for name, page in r.pages.items():
+                page.setVisible(bool(on) and name == r.current_page)
+            r.updateGeometry()
+
+    def apply_note_color(self):
+        """把「选项配置 → 注释颜色」应用到备注列。"""
+        try:
+            self.refresh_table()
+        except Exception:
+            pass
+
+    def widen_brackets(self, text):
+        """「加宽括号」：显示时把半角括号换成全角，方便阅读（不改动数据）。"""
+        if not text or not self.opt('wide_bracket', False):
+            return text
+        for a, b in (('(', '（'), (')', '）'), ('[', '［'), (']', '］')):
+            text = text.replace(a, b)
+        return text
+
+    def _ref_code_tip(self, row, sec):
+        """「自动显示引用代码工程量注释」：备注里提到别的行编号时，
+        把被引用行的工程量作为提示显示出来（只提示，不改数据）。"""
+        if not self.opt('show_ref_code', True):
+            return ''
+        text = ((getattr(row, 'remark', '') or '') + ' ' +
+                (getattr(row, 'formula', '') or ''))
+        if not text.strip():
+            return ''
+        rows = getattr(sec, 'rows', []) or []
+        tips = []
+        for other in rows:
+            if other is row:
+                continue
+            code = (getattr(other, 'code', '') or '').strip()
+            if len(code) < 2 or code not in text:
+                continue
+            if other.no_count or other.value is None:
+                tips.append('%s：未计入' % code)
+            else:
+                tips.append('%s：%s' % (code, fmt_num(
+                    other.value,
+                    precision_for_unit(other.unit, self.precision))))
+        if not tips:
+            return ''
+        return '引用代码工程量：' + '；'.join(tips)
+
+    def _auto_unit_for(self, sec):
+        """「分部单位自动应用到计算式」：从分部名称末尾认出单位
+        （如“回填土 m3”），新建计算式时自动带上该单位。"""
+        if not self.opt('auto_unit', True) or sec is None:
+            return ''
+        name = (getattr(sec, 'name', '') or '').strip()
+        if not name:
+            return ''
+        for u in sorted(UNIT_LIST, key=len, reverse=True):
+            if not u:
+                continue
+            if name.endswith(u):
+                return u
+        return ''
+
+    def summary_scope_only_cur(self):
+        """汇总弹窗里“仅当前分部（含下级）”的勾选状态（查看报表也要用）。"""
+        try:
+            return bool(self.summary_panel.only_cur.isChecked())
+        except Exception:
+            return False
 
     def schedule_summary_refresh(self):
-        """数据变化后延时刷新右侧汇总（面板收起时不刷）。"""
-        if not hasattr(self, 'summary_panel') or getattr(self, '_sum_folded', False):
+        """数据变化后延时刷新汇总（弹窗开着才刷）。"""
+        if not hasattr(self, 'summary_panel') or getattr(self, '_sum_folded', True):
             return
         if getattr(self, '_sum_timer', None) is None:
             self._sum_timer = QTimer(self)
@@ -7904,6 +8602,12 @@ class MainWindow(QMainWindow):
             if hasattr(self, 'main_split'):
                 self.settings.setValue('main_left_w', self._left_width)
                 self.settings.setValue('main_sum_w', self._sum_width)
+            # V3.7.0：记住上次关闭窗口大小及位置（选项配置 → 快速启动）
+            if self.opt('save_geometry', True):
+                try:
+                    self.settings.setValue('win_geometry', self.saveGeometry())
+                except Exception:
+                    pass
             if getattr(self, 'current_section', None) is not None:
                 self.settings.setValue('last_section', self.current_section.id)
         if self._dirty and self.current_file and not test_mode:
@@ -7928,6 +8632,11 @@ class MainWindow(QMainWindow):
             self.project = Project.load(path)
             if (self.project.name or '').strip() in ('', '未命名工程'):
                 self.project.name = self.name_from_path(path)
+            # V3.7.0：工程设了密码时，打开前先要密码
+            digest = (self.project.info or {}).get('password')
+            if digest and not self._ask_project_password(digest):
+                self.status.showMessage('密码不正确，已取消打开', 4000)
+                return
             self.current_file = path
             self.current_section = self.project.root
             # 根节点常常是空壳（数据在下级分部/分项），自动跳到内容最多的节点，
