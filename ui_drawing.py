@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 """V3.7.5 图纸功能：
 
-* 区域截图覆盖层（全屏置顶，拖拽选区，Esc 取消，类似 QQ 截图）；
+* 区域截图覆盖层（全屏置顶，拖拽选区，选完弹工具条：形状 / 确认 / 重选 / 取消，
+  Esc 随时退出，类似 QQ 截图）；
 * 图片放大查看器（滚轮 / 按钮缩放，拖动平移，可打开原图路径）；
 * 工作区右侧「图纸预览」面板（跟随选中行联动，点击放大）。
 
@@ -18,11 +19,11 @@ from datetime import datetime
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QDialog,
     QGraphicsView, QGraphicsScene, QGraphicsPixmapItem, QFileDialog,
-    QApplication, QFrame
+    QApplication, QFrame, QButtonGroup
 )
 from PyQt5.QtCore import Qt, QRect, QRectF, QSize, QEventLoop, QPoint, pyqtSignal, QTimer
 from PyQt5.QtGui import (QPixmap, QPainter, QColor, QPen, QBrush, QGuiApplication,
-                         QPixmapCache, QImage, QKeySequence)
+                         QPixmapCache, QImage, QKeySequence, QPainterPath)
 
 MAX_IMG_W = 1600
 MAX_IMG_H = 1200
@@ -95,8 +96,26 @@ def img_size(d):
 
 # ---------------- 区域截图覆盖层 ----------------
 
+def _ellipse_masked(pix):
+    """把矩形截图按椭圆裁形（四周透明，PNG 保存时保留）。"""
+    img = QImage(pix.size(), QImage.Format_ARGB32_Premultiplied)
+    img.fill(Qt.transparent)
+    p = QPainter(img)
+    p.setRenderHint(QPainter.Antialiasing)
+    path = QPainterPath()
+    path.addEllipse(QRectF(0.5, 0.5, pix.width() - 1.0, pix.height() - 1.0))
+    p.setClipPath(path)
+    p.drawPixmap(0, 0, pix)
+    p.end()
+    return QPixmap.fromImage(img)
+
+
 class _CaptureOverlay(QWidget):
-    """单屏覆盖层：显示冻结的全屏画面 + 半透明暗罩，拖拽选出亮区。"""
+    """单屏覆盖层：显示冻结的全屏画面 + 半透明暗罩，拖拽选出亮区。
+
+    V3.7.6：拖选完成后弹浮动工具条——可选形状（矩形 / 椭圆）、确认截图、
+    重新选择、取消退出；不再只靠 Esc 退出。双击选区同样确认。
+    """
 
     def __init__(self, screen_pix, result, loop):
         super().__init__(None, Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint |
@@ -107,9 +126,70 @@ class _CaptureOverlay(QWidget):
         self._loop = loop
         self._start = None
         self._end = None
+        self._sel = None                     # 已确定的选区（松开鼠标后）
+        self._shape = 'rect'                 # 'rect' | 'ellipse'
+        self._toolbar = None
         self.setCursor(Qt.CrossCursor)
         self.setWindowTitle('CalcBook 截图')
 
+    # ---------- 工具条 ----------
+    def _build_toolbar(self):
+        tb = QWidget(self)
+        tb.setStyleSheet(
+            'QWidget { background: rgba(38,38,38,240); border-radius: 5px; }'
+            'QPushButton { color:#ffffff; background: transparent; border: none;'
+            '             padding: 3px 9px; font-size: 12px; }'
+            'QPushButton:hover { background: rgba(255,255,255,45); }'
+            'QPushButton:checked { background: #2f7de0; }'
+            'QPushButton#ok { background: #2f7de0; }'
+            'QPushButton#ok:hover { background: #4f97ec; }')
+        lay = QHBoxLayout(tb)
+        lay.setContentsMargins(5, 2, 5, 2)
+        lay.setSpacing(1)
+        b_rect = QPushButton('矩形', tb)
+        b_ell = QPushButton('椭圆', tb)
+        for b in (b_rect, b_ell):
+            b.setCheckable(True)
+        b_rect.setChecked(True)
+        grp = QButtonGroup(tb)
+        grp.setExclusive(True)
+        grp.addButton(b_rect)
+        grp.addButton(b_ell)
+        b_rect.clicked.connect(lambda: self._set_shape('rect'))
+        b_ell.clicked.connect(lambda: self._set_shape('ellipse'))
+        b_ok = QPushButton('确认截图', tb)
+        b_ok.setObjectName('ok')
+        b_ok.clicked.connect(self._confirm)
+        b_re = QPushButton('重新选择', tb)
+        b_re.clicked.connect(self._reselect)
+        b_cancel = QPushButton('取消', tb)
+        b_cancel.clicked.connect(self._loop.quit)
+        for b in (b_rect, b_ell, b_ok, b_re, b_cancel):
+            lay.addWidget(b)
+        tb.adjustSize()
+        return tb
+
+    def _set_shape(self, shape):
+        self._shape = shape
+        self.update()
+
+    def _show_toolbar(self):
+        r = self._sel_rect()
+        if r is None:
+            return
+        if self._toolbar is None:
+            self._toolbar = self._build_toolbar()
+        self._toolbar.show()
+        self._toolbar.raise_()
+        self._toolbar.adjustSize()
+        x = r.x() + r.width() - self._toolbar.width()
+        y = r.y() + r.height() + 6
+        if y + self._toolbar.height() > self.height():
+            y = max(0, r.y() - self._toolbar.height() - 6)
+        x = max(0, min(x, self.width() - self._toolbar.width()))
+        self._toolbar.move(x, y)
+
+    # ---------- 事件（全部用子类事件，不用 eventFilter） ----------
     def keyPressEvent(self, ev):
         if ev.key() == Qt.Key_Escape:
             self._loop.quit()
@@ -118,11 +198,14 @@ class _CaptureOverlay(QWidget):
 
     def mousePressEvent(self, ev):
         if ev.button() == Qt.LeftButton:
+            # 已选定状态下在空白处再按下 = 重新框选
+            if self._toolbar is not None:
+                self._toolbar.hide()
             self._start = ev.pos()
             self._end = ev.pos()
             self.update()
             return
-        self._loop.quit()            # 右键 / 中键 = 取消
+        self._loop.quit()            # 右键 / 中键 = 取消退出
 
     def mouseMoveEvent(self, ev):
         if self._start is not None:
@@ -138,11 +221,43 @@ class _CaptureOverlay(QWidget):
             self._start = None       # 太小当作误点，继续选
             self.update()
             return
+        self._start = self._end = None
+        self._sel = r
+        self._show_toolbar()
+        self.update()
+
+    def mouseDoubleClickEvent(self, ev):
+        if getattr(self, '_sel', None):
+            self._confirm()
+
+    def _sel_rect(self):
+        """当前选区（拖拽中或已确定）。"""
+        if getattr(self, '_sel', None):
+            return self._sel
+        if self._start is not None and self._end is not None:
+            return self._norm()
+        return None
+
+    def _confirm(self):
+        r = self._sel_rect()
+        if r is None or r.width() < 4 or r.height() < 4:
+            return
         dpr = self._pix.devicePixelRatio() or 1.0
         crop = QRect(int(r.x() * dpr), int(r.y() * dpr),
                      int(r.width() * dpr), int(r.height() * dpr))
-        self._result.append(self._pix.copy(crop))
+        pix = self._pix.copy(crop)
+        if self._shape == 'ellipse':
+            pix = _ellipse_masked(pix)
+        self._result.append(pix)
         self._loop.quit()
+
+    def _reselect(self):
+        """重新选择：清掉当前选区，回到拖拽框选状态。"""
+        if self._toolbar is not None:
+            self._toolbar.hide()
+        self._start = self._end = None
+        self._sel = None
+        self.update()
 
     def _norm(self):
         x1, y1 = self._start.x(), self._start.y()
@@ -153,19 +268,36 @@ class _CaptureOverlay(QWidget):
         p = QPainter(self)
         p.drawPixmap(0, 0, self._pix)
         p.fillRect(self.rect(), QColor(0, 0, 0, 70))     # 暗罩
-        if self._start is not None and self._end is not None:
-            r = self._norm()
-            # 亮出选区：把原画面再画一遍（不带罩），加边框
+        r = self._sel_rect()
+        if r is None:
+            return
+        dragging = self._start is not None
+        # 亮出选区：把原画面再画一遍（不带罩）
+        if self._shape == 'ellipse':
+            path = QPainterPath()
+            path.addEllipse(QRectF(r))
+            p.save()
+            p.setClipPath(path)
+            p.drawPixmap(0, 0, self._pix, r.x(), r.y(), r.width(), r.height())
+            p.restore()
+            p.setPen(QPen(QColor('#2f7de0'), 2))
+            p.setBrush(Qt.NoBrush)
+            p.drawEllipse(r)
+        else:
             p.drawPixmap(0, 0, self._pix, r.x(), r.y(), r.width(), r.height())
             p.setPen(QPen(QColor('#2f7de0'), 2))
             p.setBrush(Qt.NoBrush)
             p.drawRect(r)
-            tip = '%d × %d  松开完成，Esc 取消' % (r.width(), r.height())
-            p.fillRect(QRect(r.x(), max(0, r.y() - 22), r.width(), 20),
-                       QColor('#2f7de0'))
-            p.setPen(QPen(QColor('#ffffff')))
-            p.drawText(QRect(r.x(), max(0, r.y() - 22), r.width(), 20),
-                       Qt.AlignCenter, tip)
+        if dragging:
+            tip = '%d × %d  松开鼠标完成选择' % (r.width(), r.height())
+        else:
+            tip = ('%d × %d  双击或点「确认截图」完成，'
+                   '点其他位置重新框选' % (r.width(), r.height()))
+        p.fillRect(QRect(r.x(), max(0, r.y() - 22), r.width(), 20),
+                   QColor('#2f7de0'))
+        p.setPen(QPen(QColor('#ffffff')))
+        p.drawText(QRect(r.x(), max(0, r.y() - 22), r.width(), 20),
+                   Qt.AlignCenter, tip)
 
 
 def capture_region():

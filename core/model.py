@@ -147,6 +147,8 @@ class Section:
         self.children = []
         self.rows = []
         self.expanded = True
+        # V3.7.6：节点外链（网址或文件路径），明细子目等节点可挂链接
+        self.link = ''
 
     def add_child(self, name="新建分部"):
         c = Section(name, self)
@@ -161,15 +163,19 @@ class Section:
         return d
 
     def to_dict(self):
-        return dict(id=self.id, name=self.name, expanded=self.expanded,
-                    children=[c.to_dict() for c in self.children],
-                    rows=[r.to_dict() for r in self.rows])
+        d = dict(id=self.id, name=self.name, expanded=self.expanded,
+                 children=[c.to_dict() for c in self.children],
+                 rows=[r.to_dict() for r in self.rows])
+        if getattr(self, 'link', ''):        # 有链接才写盘，老文件零改动
+            d['link'] = self.link
+        return d
 
     @classmethod
     def from_dict(cls, d, parent=None):
         s = cls(d.get('name', '分部'), parent)
         s.id = d.get('id', new_id())
         s.expanded = d.get('expanded', True)
+        s.link = d.get('link', '')
         s.rows = [Row.from_dict(x) for x in d.get('rows', [])]
         s.children = [cls.from_dict(x, s) for x in d.get('children', [])]
         return s

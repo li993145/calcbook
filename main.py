@@ -41,7 +41,7 @@ from ui_drawing import (encode_img, decode_img, capture_region, img_size,
 APP_NAME = "工程量计算书"
 # 本表内部复制/剪切的结构化剪贴板格式（多行整行复制 → 粘到任意位置插入行，不覆盖已有数据）
 CB_ROWS_MIME = 'application/x-calcbook-rows'
-APP_VER = "3.7.5"
+APP_VER = "3.7.6"
 FILE_EXT = '.gcls'          # 工程文件后缀（内容仍是 JSON，便于排查与迁移）
 # V3.7.3：表格最大行列数与 WPS 表格一致（1048576 行 × 16384 列）
 MAX_ROWS = 1048576
@@ -3656,18 +3656,16 @@ class MainWindow(QMainWindow):
                     ('导入表格', 'open', self.import_table, '', False),
                 ]),
                 ('编辑', [
+                    # V3.7.6：插入/添加计算式、插入明细、插入/添加分部
+                    #         从工具栏取消（导航栏右键已有这些功能）；
+                    #         F9 快捷键保留（窗口级 QShortcut，见下）
                     ('项目选项', 'settings', self.project_options, '', True),
-                    ('插入计算式', 'add', self.insert_row_below, 'F9', True),
-                    ('添加计算式', 'add', self.add_row_at_end, '', False),
-                    ('插入明细', 'add', self.insert_child_section, '', False),
-                    ('插入分部', 'add', self.insert_section_node, '', False),
-                    ('添加分部', 'add', self.add_section_node, '', False),
                     ('用分部打新', 'copy', self.duplicate_section, '', False),
                     ('分部打断', 'delete', self.split_section_at_row, '', False),
                 ]),
                 ('图纸', [
                     ('图纸截图', 'add', self.capture_row_img, '', False),
-                    ('选择图纸', 'open', self.pick_row_img, '', False),
+                    # V3.7.6：「选择图纸」按钮取消（单元格右键「图纸」子菜单里仍可用）
                     ('图纸预览', 'doc', self.toggle_img_panel, '', False),
                 ]),
                 ('层级', [
@@ -3676,7 +3674,7 @@ class MainWindow(QMainWindow):
                     ('升级', 'up', self.promote_section, '', False),
                     ('降级', 'down', self.demote_section, '', False),
                     ('特殊字符', 'settings', self.show_symbol_picker, '', False),
-                    ('注释标签', 'settings', self.insert_annotation_label, '', False),
+                    # V3.7.6：「注释标签」按钮取消，改到单元格右键菜单
                 ]),
                 ('剪贴板', [
                     ('复制', 'copy', self.copy_rows, 'Ctrl+C', False),
@@ -3743,6 +3741,13 @@ class MainWindow(QMainWindow):
             sc.activated.connect(lambda m=mode: self.insert_bracket(m))
             sc.setWhatsThis(label)
             self.bracket_shortcuts.append(sc)
+
+        # V3.7.6：工具栏「插入计算式」按钮取消后，F9 仍要保留，
+        #         改注册为窗口级快捷键（原快捷键挂在按钮上，按钮删了就没了）
+        sc_f9 = QShortcut(QKeySequence('F9'), self)
+        sc_f9.setContext(Qt.WindowShortcut)
+        sc_f9.activated.connect(self.insert_row_below)
+        self.bracket_shortcuts.append(sc_f9)
 
 
         # 主工作区（三个页签内容，但工具条常驻）
@@ -4485,7 +4490,7 @@ class MainWindow(QMainWindow):
         <ul>
         <li>最上面是自绘标题栏：左端显示<b>橘黄底的软件图标</b> → 软件名与版本 → 工程文件名称 → <code>[文件存放详细地址]</code>；不再显示常用函数快捷按钮；最右端是最小化 / 最大化 / 关闭。未保存的工程显示 <code>[未保存]</code>。</li>
         <li>标题栏空白处按住可拖动窗口，双击最大化 / 还原；鼠标移到窗口边缘可拖拽调整大小。路径过长时中间省略，鼠标悬停可看全路径。</li>
-        <li>Ribbon 三个页签：<b>计算书编辑</b>、<b>数据导出</b>、<b>关于产品</b>。「计算书编辑」按成熟工程量软件的版面分为 <b>文件 / 编辑 / 层级 / 剪贴板 / 表格 / 选项</b> 六组：文件（新建、打开、保存、另存为、最近打开、备份目录、导入表格）；编辑（项目选项、插入计算式 F9、添加计算式、插入明细、插入分部、添加分部、用分部打新）；层级（上移、下移、升级、降级、特殊字符、注释标签）；剪贴板（复制、剪切、删除、粘贴、恢复、撤销）；表格（查找替换、层级设置、表格字体、格式刷、排序、筛选、清除筛选）；选项（选项配置）。<b>「公式编辑」页签已取消</b>，内置函数改由「插入函数」面板调用；「查看公式」「重算」按钮也已取消；F4–F7 插入括号的快捷键仍可用。</li>
+        <li>Ribbon 三个页签：<b>计算书编辑</b>、<b>数据导出</b>、<b>关于产品</b>。「计算书编辑」按成熟工程量软件的版面分为 <b>文件 / 编辑 / 图纸 / 层级 / 剪贴板 / 表格 / 选项</b> 组：文件（新建、打开、保存、另存为、最近打开、备份目录、导入表格）；编辑（项目选项、用分部打新、分部打断——<b>插入 / 添加计算式、插入明细、插入 / 添加分部等按钮 V3.7.6 起取消，这些功能导航栏右键都有</b>，F9 快捷键保留）；图纸（图纸截图、图纸预览开关）；层级（上移、下移、升级、降级、特殊字符——注释标签移到单元格右键）；剪贴板（复制、剪切、删除、粘贴、恢复、撤销）；表格（查找替换、层级设置、表格字体、格式刷、排序、筛选、清除筛选）；选项（选项配置）。<b>「公式编辑」页签已取消</b>，内置函数改由「插入函数」面板调用；「查看公式」「重算」按钮也已取消；F4–F7 插入括号的快捷键仍可用。</li>
         <li>左侧为项目结构树与常量框，右侧为公式辅助框、快捷操作行和工作区表格。分割条上有小箭头按钮可收起 / 展开（宽度会被记住）。<b>分类汇总不再是右侧常驻面板，改为弹窗</b>：在单元格里右键 →「分类汇总…」即可弹出（汇总开着也能继续编辑表格）。</li>
         <li><b>「关于产品」页签（V3.7.2 新增入群反馈）</b>：有「使用说明 / 关于产品 / <b>入群反馈</b>」三个按钮。点「入群反馈」弹出 QQ 群卡片（群号 <b>763124073</b>），<b>群号自动复制到剪贴板</b>，也可一键尝试拉起 QQ 加群；加群可以反馈问题、提建议、获取最新版本。</li>
         <li><b>序号等列输入也居中（V3.7.3）</b>：序号 / 编号 / 单位 / 工程量默认居中的列，<b>双击进入输入时文字同样居中显示</b>（以前编辑框一律靠左，看着像没居中）。</li>
@@ -4493,14 +4498,17 @@ class MainWindow(QMainWindow):
         <li><b>默认就有一片可输入的空行区（V3.7.4）</b>：新建工程 / 新建分部时，表格自动预置 <b>15 行空计算式</b>（个数可在「选项配置 → 分部 → 默认计算式个数」调整），打开就能直接填，不用先按回车或点“添加计算式”造行。</li>
         <li><b>项目结构树行距收紧（V3.7.4）</b>：左侧导航的节点行高按名称字体实际高度显示，一屏能看到更多节点。</li>
         <li><b>单元格内换行（V3.7.5）</b>：编辑单元格时按 <b>Alt+Enter</b> 在光标处插入换行，单元格内<b>多行显示、行高自动撑高</b>（工程量 / 单位 / 不计 / 图纸列除外）；普通 Enter 仍是「确定并按设置移动光标」。</li>
-        <li><b>图纸列与图纸预览（V3.7.5）</b>：「计算公式」后新增<b>「图纸」列</b>，专门给每行计算式留底对量——可<b>区域截图</b>（Ribbon「图纸截图」/ 右键「图纸（当前行）→ 截图选图纸」，类似 QQ 截图：拖拽选区、Esc 取消）、<b>选择图片文件</b>、<b>粘贴剪贴板图片</b>三种方式放图纸，格内显示缩略图；<b>工作区最右侧有「图纸预览」面板</b>，点哪一行就显示哪一行的图纸，点缩略图（或双击图纸格）放大查看：滚轮缩放、拖动平移、可打开原图文件、可另存。图纸随工程保存，Ctrl+Z 可撤销。</li>
+        <li><b>图纸列与图纸预览（V3.7.5）</b>：「计算公式」后新增<b>「图纸」列</b>，专门给每行计算式留底对量——可<b>区域截图</b>（Ribbon「图纸截图」/ 右键「图纸（当前行）→ 截图选图纸」）、<b>选择图片文件</b>、<b>粘贴剪贴板图片</b>三种方式放图纸，格内显示缩略图；<b>工作区最右侧有「图纸预览」面板</b>，点哪一行就显示哪一行的图纸，点缩略图（或双击图纸格）放大查看：滚轮缩放、拖动平移、可打开原图文件、可另存。图纸随工程保存，Ctrl+Z 可撤销。</li>
+        <li><b>截图工具条与形状（V3.7.6）</b>：拖出选区松开鼠标后，选区旁弹出<b>浮动工具条</b>——可选<b>矩形 / 椭圆</b>形状（椭圆裁形四周透明）、<b>确认截图</b>（双击选区同样确认）、<b>重新选择</b>（点其他空白处也可重新框选）、<b>取消</b>退出截图；Esc 随时退出，右键取消。</li>
+        <li><b>工具栏精简（V3.7.6）</b>：「插入 / 添加计算式」「插入明细」「插入 / 添加分部」「选择图纸」「注释标签」按钮从工具栏取消——新建节点、插入计算式（F9 保留）在<b>导航栏右键</b>完成，选图纸在<b>单元格右键「图纸」子菜单</b>完成，注释标签移到<b>单元格右键「注释标签」</b>。</li>
+        <li><b>明细子目与节点链接（V3.7.6）</b>：导航栏右键<b>「插入明细子目」</b>在当前节点下新建“明细1 / 明细2 …”节点（建完可当场填链接）；右键<b>「设置链接…」</b>给任意节点挂一个<b>网址或本地文件路径</b>（如 CAD 图、PDF、参考网页），挂了链接的节点名后带 <code>[链]</code> 标记、悬停可看链接，右键<b>「打开链接」</b>用系统默认程序打开，链接随工程保存、复制节点会一起带上。</li>
         </ul>
 
         <h3 style="color:#2f5597;">三、项目结构与层级</h3>
         <ul>
         <li>导航栏只显示节点「名称」，不再单列显示层级文字；第一级固定是<b>单项工程</b>（默认“单项工程1”，不可删除），往下依次为<b>单位工程 / 分部工程 / 分项工程</b>，可继续往下加，超过四级沿用最后一级名称。内部层级关系照常保留（新建、升级、降级、汇总不受影响），鼠标悬停节点可看到该节点的层级名。</li>
         <li>工具栏「层级设置」可改名、增删层级（例如改成 标段 / 单位工程 / 分部 / 分项）；新建节点自动使用下一级名称，如“分部工程2”。</li>
-        <li>树右键：新建单项工程 / 新建下一级 / 新建同级 / 重命名 / 上移 / 下移 / 升级 / 降级 / 删除 / <b>复制本节点 / 粘贴为下级节点 / 粘贴为同级节点</b> / 层级设置 / 工程信息。右键会先选中该节点，不可用的项变灰；删除后可用 Ctrl+Z 撤销。</li>
+        <li>树右键：新建单项工程 / 新建下一级 / 新建同级 / <b>插入明细子目（V3.7.6）</b> / <b>设置链接… / 打开链接 / 清除链接（V3.7.6）</b> / 重命名 / 上移 / 下移 / 升级 / 降级 / 删除 / <b>复制本节点 / 粘贴为下级节点 / 粘贴为同级节点</b> / 层级设置 / 工程信息。右键会先选中该节点，不可用的项变灰；删除后可用 Ctrl+Z 撤销。</li>
         <li><b>节点复制粘贴（V3.7.0）</b>：计算书、单项工程、单位工程、分部工程、分项工程<b>任意层级</b>都能自由复制。右键「复制本节点」把该节点连同<b>全部下级节点和数据行</b>一起复制；换到别的节点上右键「粘贴为下级节点」或「粘贴为同级节点」即可粘贴，重名会自动加序号（如“单位工程1(2)”），粘贴出来的节点 id 全新、互不影响；树里按 Ctrl+C / Ctrl+V 同样可以复制粘贴。</li>
         <li><b>用分部打新（V3.7.1）</b>：Ribbon「编辑」组的<b>「用分部打新」</b>以当前选中的节点为模板复制一份（连同全部下级和数据行），重名自动加序号；<b>打完新会自动切到新节点、表格跟着显示新内容</b>，状态栏会告诉你打出了多少条计算式、几个下级节点。树里没选中节点时，会以「表格当前所在的节点」为模板。</li>
         <li><b>分部打断（V3.7.4）</b>：把光标点到表格的某一行，右键选<b>「在此行打断分部」</b>（或 Ribbon「编辑」组的「分部打断」）——<b>本行起以下各行归入紧随其后的新分部</b>，新分部名称可改、重名自动加序号，打断后自动切到新分部继续填写；不用再去项目结构窗口新建节点、手动搬数据。可用 Ctrl+Z 撤销。</li>
@@ -4529,7 +4537,7 @@ class MainWindow(QMainWindow):
         <li><b>排序 / 筛选</b>：右键或工具栏「计算书编辑」可排序、筛选——先在窗口里选<b>筛选列</b>（选哪列就筛哪列，V3.5 修复）再选条件（等于 / 包含 / 数字比较 / 正则 / 按填充颜色等），只隐藏不删数据、刷新后保持、编辑数据后立即重算；比较时自动统一全 / 半角与空格（V3.6），例如 <code>Ａ－００１</code> 可用 <code>A-001</code> 筛到；内容留空或正则写错会明确提示。<b>取消筛选</b>有三个入口：筛选窗口内点「清除筛选」、工具栏「清除筛选」、右键「清除筛选」，点后立即恢复显示全部行。</li>
         <li><b>选区统计与缩放</b>：单选 / 多选「工程量」列的数据，状态栏右下角实时显示 <code>求和=… 平均值=… 计数=…</code>（WPS 式，取代原来的固定小计）；多选 / 全选后普通左键点某格会恢复为只选这一格（V3.6），统计只算真正选中的格子。在表格上按住 <b>Ctrl + 鼠标滚轮</b> 可放大 / 缩小单元格显示（字号与手动行高列宽同比例，6–24 号字），不按 Ctrl 时滚轮照常滚动。</li>
         <li><b>默认列与列宽（V3.6；V3.7.5 新增图纸列）</b>：默认列顺序为 序号 / 编号 / 项目名称 / 单位 / 工程量 / 计算公式 / <b>图纸（V3.7.5）</b> / 图纸编号 / 大样图来源 / 不计 / 备注。列宽默认固定，新增列或刷新表格不会打乱已调好的宽度；表头右键可增删 / 重命名列、设置列宽（工具栏「数据列定义」按钮已取消）。<b>序号 / 编号 / 单位 / 工程量以及新增列默认居中对齐</b>，仍可右键单独改对齐；老工程打开时「图纸」列自动补到计算公式后面，原数据不丢。</li>
-        <li><b>图纸留底（V3.7.5）</b>：右键「图纸」列 →「图纸（当前行）」可截图 / 选图 / 粘贴图片 / 放大 / 另存 / 清除；Ribbon「编辑」旁新增<b>「图纸」组</b>（图纸截图 / 选择图纸 / 图纸预览开关）。双击图纸格：有图放大、无图直接进入截图。截图时主窗口自动最小化、选完自动恢复。图纸数据存进工程文件，换电脑打开也在。</li>
+        <li><b>图纸留底（V3.7.5）</b>：右键「图纸」列 →「图纸（当前行）」可截图 / 选图 / 粘贴图片 / 放大 / 另存 / 清除；Ribbon 有<b>「图纸」组</b>（图纸截图 / 图纸预览开关，「选择图纸」按钮 V3.7.6 起取消，改在单元格右键「图纸」子菜单里）。双击图纸格：有图放大、无图直接进入截图。截图时主窗口自动最小化、选完自动恢复。图纸数据存进工程文件，换电脑打开也在。</li>
         </ul>
 
         <h3 style="color:#2f5597;">六、公式与函数</h3>
@@ -4587,10 +4595,13 @@ class MainWindow(QMainWindow):
             it.setData(0, Qt.UserRole, sec.id)
             it.setData(0, Qt.UserRole + 1, 'book' if is_book else 'section')
             it.setExpanded(sec.expanded)
-            it.setToolTip(0, '%s（%s）' % (sec.name, proj.level_of(sec)))
-            if is_book:
-                # 导航栏统一用常规字体（不加粗），单项工程用 ▣ 前缀区分
-                it.setText(0, '▣ ' + sec.name)
+            tip = '%s（%s）' % (sec.name, proj.level_of(sec))
+            label = ('▣ ' + sec.name) if is_book else sec.name
+            if getattr(sec, 'link', ''):          # V3.7.6：节点挂了链接
+                label += ' [链]'
+                tip += '\n链接：%s（右键可打开 / 修改）' % sec.link
+            it.setText(0, label)
+            it.setToolTip(0, tip)
             if level_colors:
                 it.setForeground(0, QBrush(QColor(palette[depth % len(palette)])))
             if parent_item:
@@ -5759,6 +5770,7 @@ class MainWindow(QMainWindow):
         """深拷贝一个树节点（含下级节点与全部数据行），并重新生成 id。"""
         new = Section(sec.name, parent)
         new.expanded = getattr(sec, 'expanded', True)
+        new.link = getattr(sec, 'link', '')          # V3.7.6 链接一起复制
         new.rows = []
         for r in getattr(sec, 'rows', []) or []:
             nr = Row.from_dict(r.to_dict())
@@ -5903,6 +5915,13 @@ class MainWindow(QMainWindow):
             menu.addAction('删除%s' % level, self.delete_section)
         # 工具栏不再放“工程信息”按钮，改到树右键里，需要改时随时能改
         menu.addSeparator()
+        # V3.7.6：明细子目 + 节点链接（工具栏「插入明细」取消后挪到这里）
+        menu.addAction('插入明细子目', self.insert_detail_node)
+        if not proj.is_book(sec):
+            menu.addAction('设置链接…', self.set_section_link)
+            if getattr(sec, 'link', ''):
+                menu.addAction('打开链接', self.open_section_link)
+                menu.addAction('清除链接', self.clear_section_link)
         menu.addAction('复制本节点（含下级与数据）', self.copy_tree_section)
         act_paste_child = menu.addAction('粘贴为下级节点', lambda: self.paste_tree_section('child'))
         act_paste_sib = menu.addAction('粘贴为同级节点', lambda: self.paste_tree_section('sibling'))
@@ -6145,6 +6164,8 @@ class MainWindow(QMainWindow):
         align_menu.addAction('恢复默认对齐', lambda: self.cell_align_set('default'))
         menu.addAction('选中单元格转半角（全角→半角）', self.narrow_cells)
         menu.addSeparator()
+        # V3.7.6：注释标签入口移到单元格右键（原工具栏按钮取消）
+        menu.addAction('注释标签（插入备注标记）', self.insert_annotation_label)
         menu.addAction('标记为不计', self.toggle_no_count)
         menu.addSeparator()
         menu.addAction('设置打印区域（仅打印选中部分）', self.set_print_area)
@@ -8963,6 +8984,90 @@ class MainWindow(QMainWindow):
         self._dirty = True
         self.status.showMessage('已插入%s「%s」' % (label, new.name), 3000)
 
+    # ---------------- 明细子目与节点链接（V3.7.6） ----------------
+    def insert_detail_node(self, *args):
+        """插入明细子目：在当前节点下新建一个「明细」节点，并可当场挂链接。
+
+        明细子目就是一个普通的下级节点，名称自动编为 明细1 / 明细2 …；
+        建完立刻问一次链接（网址或文件路径，可留空以后再设——右键「设置链接」）。
+        """
+        sec = self._tree_section()
+        if sec is None:
+            return
+        used = [c.name for c in sec.children]
+        name = self.project._pick_name('明细', used)
+        self.push_undo('插入明细子目')
+        new = Section(name, sec)
+        self._apply_default_rows(new)
+        sec.children.insert(0, new)
+        sec.expanded = True
+        self.project.recalc()
+        self.refresh_tree()
+        self.select_section(new)
+        self._dirty = True
+        link, ok = QInputDialog.getText(
+            self, '设置链接',
+            '已插入明细子目「%s」。\n链接（网址或文件路径，可留空稍后在右键'
+            '「设置链接…」里填）：' % name, QLineEdit.Normal, '')
+        if ok and link.strip():
+            new.link = link.strip()
+            self.refresh_tree()
+            self._dirty = True
+            self.status.showMessage('已插入明细子目「%s」，链接已设置（右键可打开）'
+                                    % new.name, 4000)
+        else:
+            self.status.showMessage('已插入明细子目「%s」' % new.name, 3000)
+
+    def set_section_link(self, *args):
+        """为当前导航节点设置链接（网址 http(s)://… 或本地文件路径）。"""
+        sec = self._tree_section()
+        if sec is None:
+            return
+        link, ok = QInputDialog.getText(
+            self, '设置链接', '链接（网址或文件路径）：',
+            QLineEdit.Normal, getattr(sec, 'link', ''))
+        if not ok:
+            return
+        self.push_undo('设置链接')
+        sec.link = link.strip()
+        self.refresh_tree()
+        self._dirty = True
+        if sec.link:
+            self.status.showMessage('已为「%s」设置链接（右键「打开链接」可打开）'
+                                    % sec.name, 4000)
+        else:
+            self.status.showMessage('已清除「%s」的链接' % sec.name, 3000)
+
+    def open_section_link(self, *args):
+        """用系统默认程序打开当前节点挂的链接。"""
+        sec = self._tree_section()
+        if sec is None:
+            return
+        link = (getattr(sec, 'link', '') or '').strip()
+        if not link:
+            QMessageBox.information(self, APP_NAME, '该节点还没有设置链接。')
+            return
+        from PyQt5.QtCore import QUrl
+        from PyQt5.QtGui import QDesktopServices
+        if os.path.exists(link):
+            url = QUrl.fromLocalFile(link)      # 本地文件 / 文件夹
+        else:
+            url = QUrl(link)                    # 网址（补全省略的 scheme）
+            if url.scheme() not in ('http', 'https', 'ftp', 'file'):
+                url = QUrl('http://' + link)
+        if not QDesktopServices.openUrl(url):
+            QMessageBox.warning(self, APP_NAME, '无法打开链接：\n%s' % link)
+
+    def clear_section_link(self, *args):
+        sec = self._tree_section()
+        if sec is None or not getattr(sec, 'link', ''):
+            return
+        self.push_undo('清除链接')
+        sec.link = ''
+        self.refresh_tree()
+        self._dirty = True
+        self.status.showMessage('已清除「%s」的链接' % sec.name, 3000)
+
     def _section_level_depth(self, sec):
         """插入/添加“分部”时用的层级深度。
 
@@ -9065,7 +9170,7 @@ class MainWindow(QMainWindow):
         row = self.table.currentRow()
         if len(rows) == 0:
             QMessageBox.information(self, APP_NAME, '当前分部没有计算行，无需打断。\n'
-                                    '要新增分部请用「添加分部」。')
+                                    '要新增分部请在左侧导航栏右键「新建下一级 / 新建同级」。')
             return
         if row < 0:
             row = 0
@@ -9077,7 +9182,7 @@ class MainWindow(QMainWindow):
         if row >= len(rows):
             QMessageBox.information(self, APP_NAME,
                                     '光标在最后一行之后，以下没有可拆走的行。\n'
-                                    '要往后补一个新分部请用「添加分部」。')
+                                    '要往后补一个新分部请在左侧导航栏右键「新建同级」。')
             return
         name, ok = QInputDialog.getText(
             self, '分部打断',
