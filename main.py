@@ -35,11 +35,13 @@ from core.highlighter import FormulaHighlighter, compute_runs, FCOLOR
 from ui_options import (DEFAULT_OPTIONS, OptionConfigDialog, ProjectOptionsDialog,
                         check_password, merged_options)
 from ui_report import ReportViewerDialog
+from ui_drawing import (encode_img, decode_img, capture_region, img_size,
+                        ImageViewerDialog, PreviewPanel)
 
 APP_NAME = "工程量计算书"
 # 本表内部复制/剪切的结构化剪贴板格式（多行整行复制 → 粘到任意位置插入行，不覆盖已有数据）
 CB_ROWS_MIME = 'application/x-calcbook-rows'
-APP_VER = "3.7.4"
+APP_VER = "3.7.5"
 FILE_EXT = '.gcls'          # 工程文件后缀（内容仍是 JSON，便于排查与迁移）
 # V3.7.3：表格最大行列数与 WPS 表格一致（1048576 行 × 16384 列）
 MAX_ROWS = 1048576
@@ -458,6 +460,20 @@ class CellEditorFilter(QObject):
     def eventFilter(self, obj, ev):
         if ev.type() == QEvent.KeyPress:
             try:
+                # V3.7.5：Alt+Enter 在单元格内换行（插入真实换行符，多行显示）
+                if (ev.key() in (Qt.Key_Return, Qt.Key_Enter)
+                        and ev.modifiers() & Qt.AltModifier):
+                    key = ''
+                    try:
+                        key = self.win.col_key(self.win.table.currentColumn())
+                    except Exception:
+                        pass
+                    if key in ('value', 'unit', 'no_count', 'img'):
+                        return True          # 这些列不支持换行，吞掉按键
+                    if isinstance(obj, QLineEdit):
+                        obj.insert('\n')
+                        return True
+                    return True
                 if (ev.key() in (Qt.Key_Return, Qt.Key_Enter)
                         and not (ev.modifiers() & (Qt.ControlModifier | Qt.ShiftModifier))):
                     if self.win.opt('enter_dir', 'down') == 'right':
@@ -800,6 +816,8 @@ class LiveSyncDelegate(QStyledItemDelegate):
         key = self.win.col_key(index.column())
         if key == 'no_count':
             return None                 # 勾选框不需要文本编辑器
+        if key == 'img':
+            return None                 # V3.7.5 图纸列：双击走放大/截图，不进文本编辑
         # V3.7.3：编辑器跟随单元格对齐——序号/编号/单位/工程量等默认居中的列，
         # 双击进入输入时文字也居中显示（以前编辑器一律靠左，看着像没居中）。
         try:
@@ -912,7 +930,24 @@ class LiveSyncDelegate(QStyledItemDelegate):
 
     def paint(self, painter, option, index):
         key = self.win.col_key(index.column())
+        if key == 'img':
+            try:
+                self._paint_img(painter, option, index)
+            except Exception:
+                log_exception('图纸格绘制')
+                super().paint(painter, option, index)
+            return
         if key not in ('no_count', 'formula'):
+            # V3.7.5：文本里带换行符（Alt+Enter）的格，逐行绘制
+            try:
+                opt0 = QStyleOptionViewItem(option)
+                self.initStyleOption(opt0, index)
+                if '\n' in (opt0.text or ''):
+                    self._paint_multiline(painter, opt0, index)
+                    self._overlay_hilite(painter, opt0, index)
+                    return
+            except Exception:
+                log_exception('多行格绘制')
             super().paint(painter, option, index)
             try:
                 self._overlay_hilite(painter, option, index)
@@ -950,10 +985,84 @@ class LiveSyncDelegate(QStyledItemDelegate):
             except Exception:
                 pass
 
+    def _paint_img(self, painter, option, index):
+        """图纸格：画背景后居中放缩略图；无图纸画浅色占位框。"""
+        opt = QStyleOptionViewItem(option)
+        self.initStyleOption(opt, index)
+        opt.text = ''
+        style = opt.widget.style() if opt.widget is not None else QApplication.style()
+        painter.save()
+        style.drawControl(QStyle.CE_ItemViewItem, opt, painter, opt.widget)
+        painter.restore()
+        pix = self.win.img_thumb_for(index.row())
+        r = option.rect.adjusted(3, 3, -3, -3)
+        if pix is not None and not pix.isNull():
+            pm = pix.scaled(r.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            x = r.x() + (r.width() - pm.width()) // 2
+            y = r.y() + (r.height() - pm.height()) // 2
+            painter.drawPixmap(x, y, pm)
+        else:
+            painter.setPen(QPen(QColor('#b8c6d8'), 1, Qt.DashLine))
+            painter.setBrush(Qt.NoBrush)
+            painter.drawRect(r.adjusted(6, 5, -6, -5))
+            painter.setPen(QPen(QColor('#9aa8b8')))
+            f = painter.font()
+            f.setPointSizeF(max(7, f.pointSizeF() - 1))
+            painter.setFont(f)
+            painter.drawText(r, Qt.AlignCenter, '＋\n图纸')
+        self._overlay_hilite(painter, option, index)
+
+    def _paint_multiline(self, painter, opt, index):
+        """带换行符的文本格：背景照常，文字逐行画（对齐跟随单元格设置）。"""
+        text = opt.text or ''
+        opt.text = ''
+        style = opt.widget.style() if opt.widget is not None else QApplication.style()
+        painter.save()
+        style.drawControl(QStyle.CE_ItemViewItem, opt, painter, opt.widget)
+        painter.restore()
+        lines = text.split('\n')
+        fm = QFontMetrics(opt.font)
+        line_h = fm.height()
+        total = len(lines) * line_h
+        r = opt.rect.adjusted(4, 2, -4, -2)
+        if opt.state & QStyle.State_Selected:
+            painter.setPen(QPen(opt.palette.color(QPalette.HighlightedText)))
+        else:
+            painter.setPen(QPen(opt.palette.color(QPalette.Text)))
+        painter.setFont(opt.font)
+        al = opt.textAlignment
+        halign = Qt.AlignHCenter if al & Qt.AlignHCenter else (
+            Qt.AlignRight if al & Qt.AlignRight else Qt.AlignLeft)
+        if al & Qt.AlignVCenter:
+            y = r.top() + max(0, (r.height() - total) // 2)
+        else:
+            y = r.top()
+        for ln in lines:
+            painter.drawText(QRect(r.left(), y, r.width(), line_h),
+                             halign | Qt.AlignVCenter, ln)
+            y += line_h
+
     def sizeHint(self, option, index):
-        """公式列按当前列宽折行后的真实高度，resizeRowsToContents() 用它撑高行。"""
-        if self.win.col_key(index.column()) != 'formula':
-            return super().sizeHint(option, index)
+        """公式列按当前列宽折行后的真实高度，resizeRowsToContents() 用它撑高行；
+        V3.7.5：带换行符的文本格、图纸格也要撑高行。"""
+        key = self.win.col_key(index.column())
+        if key != 'formula':
+            base = super().sizeHint(option, index)
+            try:
+                if key == 'img':
+                    if self.win.img_thumb_for(index.row()) is not None:
+                        base.setHeight(int(max(base.height(), 64)))
+                    return base
+                opt = QStyleOptionViewItem(option)
+                self.initStyleOption(opt, index)
+                text = opt.text or ''
+                if '\n' in text:
+                    fm = QFontMetrics(opt.font)
+                    need = len(text.split('\n')) * fm.height() + 10
+                    base.setHeight(int(max(base.height(), min(300, need))))
+            except Exception:
+                log_exception('行高计算')
+            return base
         base = super().sizeHint(option, index)
         try:
             opt = QStyleOptionViewItem(option)
@@ -3556,6 +3665,11 @@ class MainWindow(QMainWindow):
                     ('用分部打新', 'copy', self.duplicate_section, '', False),
                     ('分部打断', 'delete', self.split_section_at_row, '', False),
                 ]),
+                ('图纸', [
+                    ('图纸截图', 'add', self.capture_row_img, '', False),
+                    ('选择图纸', 'open', self.pick_row_img, '', False),
+                    ('图纸预览', 'doc', self.toggle_img_panel, '', False),
+                ]),
                 ('层级', [
                     ('上移', 'up', self.move_section_up, '', False),
                     ('下移', 'down', self.move_section_down, '', False),
@@ -3928,6 +4042,8 @@ class MainWindow(QMainWindow):
             lambda _log, _old, _new: self.frozen.sync_one_height(_log, _new))
         self.table.itemChanged.connect(self.on_cell_changed)
         self.table.currentCellChanged.connect(self.on_cell_cursor)
+        # V3.7.5：图纸列双击 = 有图放大查看 / 无图直接截图
+        self.table.cellDoubleClicked.connect(self.on_img_cell_double_click)
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self.table_menu)
         # 列可拖动
@@ -3950,6 +4066,12 @@ class MainWindow(QMainWindow):
         self.right_split = right_split
         self.work_pane = right
         main_split.addWidget(right)
+
+        # ===== V3.7.5：最右侧图纸预览面板（跟随选中行，点击放大） =====
+        self.img_panel = PreviewPanel()
+        self.img_panel.open_requested.connect(self.view_row_img)
+        self.img_panel.hide_requested.connect(lambda: self.toggle_img_panel(False))
+        main_split.addWidget(self.img_panel)
 
         # ===== 分类汇总：V3.7.0 起不再停靠在右侧，改为弹窗（右键单元格即可打开）=====
         self.summary_panel = SummaryPanel(self)
@@ -3975,6 +4097,15 @@ class MainWindow(QMainWindow):
             self._applying_sizes = False
         main_split.splitterMoved.connect(self._remember_split_widths)
         self.main_split = main_split
+
+        # V3.7.5：图纸预览面板默认显示（记住用户上次的开/关选择）
+        try:
+            vis = True
+            if not os.environ.get('CALCBOOK_NO_RESTORE'):
+                vis = self.settings.value('img_panel_visible', True, type=bool)
+            self.img_panel.setVisible(bool(vis))
+        except Exception:
+            self.img_panel.setVisible(True)
 
         self.status = QStatusBar()
         self.setStatusBar(self.status)
@@ -4361,6 +4492,8 @@ class MainWindow(QMainWindow):
         <li><b>插入 / 添加行列可自定义数量（V3.7.3）</b>：插入行、添加计算式、添加列时都会先弹一个小对话框问<b>数量</b>（默认 1，<b>记住上次输入的值</b>，直接回车就是上次的数量）；一次添加多列时列名自动编号。最大行列数与 WPS 表格一致（1048576 行 × 16384 列）。</li>
         <li><b>默认就有一片可输入的空行区（V3.7.4）</b>：新建工程 / 新建分部时，表格自动预置 <b>15 行空计算式</b>（个数可在「选项配置 → 分部 → 默认计算式个数」调整），打开就能直接填，不用先按回车或点“添加计算式”造行。</li>
         <li><b>项目结构树行距收紧（V3.7.4）</b>：左侧导航的节点行高按名称字体实际高度显示，一屏能看到更多节点。</li>
+        <li><b>单元格内换行（V3.7.5）</b>：编辑单元格时按 <b>Alt+Enter</b> 在光标处插入换行，单元格内<b>多行显示、行高自动撑高</b>（工程量 / 单位 / 不计 / 图纸列除外）；普通 Enter 仍是「确定并按设置移动光标」。</li>
+        <li><b>图纸列与图纸预览（V3.7.5）</b>：「计算公式」后新增<b>「图纸」列</b>，专门给每行计算式留底对量——可<b>区域截图</b>（Ribbon「图纸截图」/ 右键「图纸（当前行）→ 截图选图纸」，类似 QQ 截图：拖拽选区、Esc 取消）、<b>选择图片文件</b>、<b>粘贴剪贴板图片</b>三种方式放图纸，格内显示缩略图；<b>工作区最右侧有「图纸预览」面板</b>，点哪一行就显示哪一行的图纸，点缩略图（或双击图纸格）放大查看：滚轮缩放、拖动平移、可打开原图文件、可另存。图纸随工程保存，Ctrl+Z 可撤销。</li>
         </ul>
 
         <h3 style="color:#2f5597;">三、项目结构与层级</h3>
@@ -4395,7 +4528,8 @@ class MainWindow(QMainWindow):
         <li><b>拖动填充柄（自动序号，V3.7.1 修正）</b>：选中单元格后右下角有蓝色小方块，按住向下 / 向右拖动即自动填充序号（纯数字等差递增、尾号数字自动进位、汉字 / 公式循环复制）。拖动时的<b>虚线框正好罩住要填充的区域</b>（以前会宽出一格，看着像拉到旁边的单元格），目标区还铺了一层淡蓝底色，一眼能看出要填到哪里。</li>
         <li><b>排序 / 筛选</b>：右键或工具栏「计算书编辑」可排序、筛选——先在窗口里选<b>筛选列</b>（选哪列就筛哪列，V3.5 修复）再选条件（等于 / 包含 / 数字比较 / 正则 / 按填充颜色等），只隐藏不删数据、刷新后保持、编辑数据后立即重算；比较时自动统一全 / 半角与空格（V3.6），例如 <code>Ａ－００１</code> 可用 <code>A-001</code> 筛到；内容留空或正则写错会明确提示。<b>取消筛选</b>有三个入口：筛选窗口内点「清除筛选」、工具栏「清除筛选」、右键「清除筛选」，点后立即恢复显示全部行。</li>
         <li><b>选区统计与缩放</b>：单选 / 多选「工程量」列的数据，状态栏右下角实时显示 <code>求和=… 平均值=… 计数=…</code>（WPS 式，取代原来的固定小计）；多选 / 全选后普通左键点某格会恢复为只选这一格（V3.6），统计只算真正选中的格子。在表格上按住 <b>Ctrl + 鼠标滚轮</b> 可放大 / 缩小单元格显示（字号与手动行高列宽同比例，6–24 号字），不按 Ctrl 时滚轮照常滚动。</li>
-        <li><b>默认列与列宽（V3.6）</b>：默认列顺序为 序号 / 编号 / 项目名称 / 单位 / 工程量 / 计算公式 / 图纸编号 / 大样图来源 / 不计 / 备注，宽度依次 80 / 135 / 340 / 80 / 100 / 600 / 150 / 150 / 80 / 200。列宽默认固定，新增列或刷新表格不会打乱已调好的宽度；表头右键可增删 / 重命名列、设置列宽（工具栏「数据列定义」按钮已取消）。<b>序号 / 编号 / 单位 / 工程量以及新增列默认居中对齐</b>，仍可右键单独改对齐。</li>
+        <li><b>默认列与列宽（V3.6；V3.7.5 新增图纸列）</b>：默认列顺序为 序号 / 编号 / 项目名称 / 单位 / 工程量 / 计算公式 / <b>图纸（V3.7.5）</b> / 图纸编号 / 大样图来源 / 不计 / 备注。列宽默认固定，新增列或刷新表格不会打乱已调好的宽度；表头右键可增删 / 重命名列、设置列宽（工具栏「数据列定义」按钮已取消）。<b>序号 / 编号 / 单位 / 工程量以及新增列默认居中对齐</b>，仍可右键单独改对齐；老工程打开时「图纸」列自动补到计算公式后面，原数据不丢。</li>
+        <li><b>图纸留底（V3.7.5）</b>：右键「图纸」列 →「图纸（当前行）」可截图 / 选图 / 粘贴图片 / 放大 / 另存 / 清除；Ribbon「编辑」旁新增<b>「图纸」组</b>（图纸截图 / 选择图纸 / 图纸预览开关）。双击图纸格：有图放大、无图直接进入截图。截图时主窗口自动最小化、选完自动恢复。图纸数据存进工程文件，换电脑打开也在。</li>
         </ul>
 
         <h3 style="color:#2f5597;">六、公式与函数</h3>
@@ -4546,6 +4680,8 @@ class MainWindow(QMainWindow):
         """按列 key 取单元格显示文本。"""
         if key == 'no_count':
             return ''
+        if key == 'img':
+            return ''                    # V3.7.5 图纸列画缩略图，无文本
         if key == 'value':
             return fmt_num(row.value, self.row_precision(row))
         if hasattr(row, key):
@@ -4597,8 +4733,14 @@ class MainWindow(QMainWindow):
                         # V3.4：编号 / 单位 / 工程量 默认居中；V3.6.1 起序号列、以及
                         # 新增的自定义列（列定义 align=center）也默认居中对齐。
                         # 用户手动设置的 row.cell_align 在 _apply_item_align 里优先覆盖。
-                        if key in ('seq', 'code', 'unit', 'value') or cd.get('align') == 'center':
+                        if key in ('seq', 'code', 'unit', 'value', 'img') or cd.get('align') == 'center':
                             it.setTextAlignment(Qt.AlignCenter | Qt.AlignVCenter)
+                        if key == 'img':
+                            d = getattr(row, 'img', None)
+                            it.setToolTip(
+                                ('双击放大查看\n' if d else '右键可截图 / 选图 / 粘贴图纸\n') +
+                                (str(d.get('path')) if d and d.get('path') else
+                                 ('图纸添加于 %s' % d.get('t', '') if d else '')))
                         if row.error and key in ('formula', 'value'):
                             it.setForeground(QColor('C00000'))
                             it.setToolTip(row.error)
@@ -4625,6 +4767,8 @@ class MainWindow(QMainWindow):
                 self.table.setItem(i, j, it)
             self.table.setRowHeight(i, 34)
         self._apply_row_height_mode()
+        # V3.7.5：图纸格 / 带换行符的格按内容撑高行（自动行高模式 sizeHint 已算，这里兜底）
+        self._apply_special_row_heights()
         # 列宽：默认按内容自适应并铺满窗口（用户手动拖过列宽后自动关闭）
         self._auto_size_columns()
         # 记住界面上当前各行的真实高度，打印时按同一行高输出
@@ -4752,6 +4896,12 @@ class MainWindow(QMainWindow):
             # 单位变了 → 该行工程量的小数位跟着变，只刷显示不重建表格
             self._update_value_cells()
             self._dirty = True
+        # V3.7.5：文本里带换行符（Alt+Enter）→ 按行数撑高该行
+        if '\n' in text:
+            try:
+                self._fit_row_height(item.row())
+            except Exception:
+                pass
 
     def set_row_value(self, row_i, col, text):
         """把值写入指定行（供空行追加时用）。"""
@@ -4770,6 +4920,191 @@ class MainWindow(QMainWindow):
             self.formula_help.setTextSilent(text)
         self.project.recalc()
         self.refresh_table()
+
+    # ---------------- 图纸列（V3.7.5） ----------------
+
+    def _img_row(self):
+        """当前行对应的模型 Row（越界 / 空行返回 None）。"""
+        sec = self.current_section
+        r = self.table.currentRow()
+        if sec is None or r < 0 or r >= len(sec.rows):
+            return None
+        return sec.rows[r]
+
+    def img_thumb_for(self, row_i):
+        """委托画格用：第 row_i 行的图纸缩略图 QPixmap（无则 None）。"""
+        try:
+            sec = self.current_section
+            if sec is None or row_i < 0 or row_i >= len(sec.rows):
+                return None
+            return decode_img(getattr(sec.rows[row_i], 'img', None), thumb=True)
+        except Exception:
+            return None
+
+    def _img_col_index(self):
+        for j, cd in enumerate(self.project.columns):
+            if cd['key'] == 'img':
+                return j
+        return -1
+
+    def set_row_img_pixmap(self, pix, path=''):
+        """把图片设到当前行的图纸列（记撤销、刷新表格与预览）。"""
+        row = self._img_row()
+        if row is None:
+            self.status.showMessage('请先点选一行计算式，再设置图纸', 3000)
+            return
+        d = encode_img(pix, path)
+        if d is None:
+            QMessageBox.information(self, APP_NAME, '图片读取失败，请换一张试试。')
+            return
+        self.push_undo('设置图纸')
+        row.img = d
+        self._dirty = True
+        self.refresh_table()
+        self._update_img_preview()
+        self.status.showMessage('已设置图纸（%d×%d）' % img_size(d), 3000)
+
+    def capture_row_img(self):
+        """区域截图 → 设为当前行图纸。"""
+        if self._img_row() is None:
+            self.status.showMessage('请先点选一行计算式，再截图', 3000)
+            return
+        self.showMinimized()
+        try:
+            QTimer.singleShot(300, self._capture_after_min)
+        except Exception:
+            self._capture_after_min()
+
+    def _capture_after_min(self):
+        try:
+            pix = capture_region()
+        finally:
+            self.showNormal()
+            self.activateWindow()
+        if pix is not None and not pix.isNull():
+            self.set_row_img_pixmap(pix)
+
+    def pick_row_img(self):
+        """选择图片文件 → 设为当前行图纸。"""
+        path, _ = QFileDialog.getOpenFileName(
+            self, '选择图纸', '', '图片文件 (*.png *.jpg *.jpeg *.bmp *.gif);;所有文件 (*.*)')
+        if not path:
+            return
+        pix = QPixmap(path)
+        if pix.isNull():
+            QMessageBox.information(self, APP_NAME, '无法读取该图片文件。')
+            return
+        self.set_row_img_pixmap(pix, path)
+
+    def paste_row_img(self):
+        """剪贴板里的图片 → 设为当前行图纸。"""
+        cb = QApplication.clipboard()
+        pix = cb.pixmap()
+        if pix is None or pix.isNull():
+            self.status.showMessage('剪贴板里没有图片（可先在聊天窗口/看图软件里复制图片）', 4000)
+            return
+        self.set_row_img_pixmap(pix)
+
+    def clear_row_img(self):
+        row = self._img_row()
+        if row is None or not getattr(row, 'img', None):
+            return
+        self.push_undo('清除图纸')
+        row.img = None
+        self._dirty = True
+        self.refresh_table()
+        self._update_img_preview()
+
+    def save_row_img(self):
+        """当前行图纸另存为图片文件。"""
+        row = self._img_row()
+        if row is None or not getattr(row, 'img', None):
+            return
+        pix = decode_img(row.img)
+        if pix is None or pix.isNull():
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, '另存图纸', os.path.join(os.path.expanduser('~'), 'Desktop', '图纸.png'),
+            'PNG (*.png);;JPEG (*.jpg)')
+        if not path:
+            return
+        ok = pix.save(path, 'PNG' if path.lower().endswith('.png') else 'JPG', 92)
+        self.status.showMessage('已保存图纸' if ok else '保存失败', 3000)
+
+    def view_row_img(self):
+        """放大查看当前行图纸。"""
+        row = self._img_row()
+        d = getattr(row, 'img', None) if row is not None else None
+        if not d:
+            # 没图纸时双击 = 直接进入截图
+            self.capture_row_img()
+            return
+        pix = decode_img(d)
+        ImageViewerDialog(self, pix,
+                          title='图纸 — %s' % ((row.code or row.name or '')[:30] or '当前行'),
+                          path=d.get('path', '')).exec_()
+
+    def toggle_img_panel(self, checked=None):
+        """显示 / 隐藏右侧图纸预览面板。"""
+        p = getattr(self, 'img_panel', None)
+        if p is None:
+            return
+        on = p.isHidden() if checked is None else bool(checked)
+        p.setVisible(on)
+        self._set_setting('img_panel_visible', on)
+
+    def _update_img_preview(self):
+        """选中行变化 / 数据刷新后联动右侧预览。"""
+        p = getattr(self, 'img_panel', None)
+        if p is None or p.isHidden():
+            return
+        row = self._img_row()
+        d = getattr(row, 'img', None) if row is not None else None
+        if not d:
+            p.set_image(None)
+            return
+        pix = decode_img(d)
+        cap = ((getattr(row, 'code', '') or '') + ' ' +
+               (getattr(row, 'name', '') or '')).strip()[:40]
+        p.set_image(pix, cap, d.get('path', ''))
+
+    def _fit_row_height(self, i):
+        """单行按内容撑高：带换行符的格按行数、图纸格按缩略图最小高度。"""
+        sec = self.current_section
+        if sec is None or i < 0 or i >= self.table.rowCount():
+            return
+        need = 34
+        fm = QFontMetrics(self.table.font())
+        for j in range(self.table.columnCount()):
+            key = self.col_key(j)
+            if key == 'img':
+                if self.img_thumb_for(i) is not None:
+                    need = max(need, 64)
+                continue
+            it = self.table.item(i, j)
+            if it is None:
+                continue
+            t = it.text()
+            if '\n' in t:
+                need = max(need, min(300, len(t.split('\n')) * fm.height() + 10))
+        self.table.setRowHeight(i, max(self.table.rowHeight(i), need))
+
+    def _apply_special_row_heights(self):
+        """整表兜底：图纸格 / 多行格不被默认 34px 行高压住。"""
+        try:
+            for i in range(self.table.rowCount()):
+                self._fit_row_height(i)
+        except Exception:
+            log_exception('行高兜底')
+
+    def on_img_cell_double_click(self, r, c):
+        if self._loading or self.col_key(c) != 'img':
+            return
+        if r >= len(self.current_section.rows):
+            return
+        self.view_row_img()
+
+    # ---------------- 选中联动 ----------------
 
     def on_cell_cursor(self, row, col, prev_row, prev_col):
         """选中单元格：公式列联动辅助框，双向同步；行 / 列高亮随光标重绘。"""
@@ -4791,6 +5126,11 @@ class MainWindow(QMainWindow):
             self.formula_help.setPlaceholderText('请选中"计算公式"列的单元格，公式将在此同步显示并着色')
             self.formula_help.setTextSilent('')
             self._formula_row = None
+        # V3.7.5：右侧图纸预览跟随选中行
+        try:
+            self._update_img_preview()
+        except Exception:
+            pass
 
     def on_note_changed(self):
         """（已取消右侧备注面板，保留空实现兼容旧调用。）"""
@@ -4920,6 +5260,14 @@ class MainWindow(QMainWindow):
     def paste_dispatch(self, text=''):
         """先认本表结构化数据（内部复制/剪切），否则按普通文本（WPS/外部/本表 TSV）粘贴。"""
         md = QApplication.clipboard().mimeData()
+        # V3.7.5：当前列是「图纸」且剪贴板是图片 → 贴成当前行图纸
+        try:
+            if (self.col_key(self.table.currentColumn()) == 'img'
+                    and md is not None and md.hasImage()):
+                self.paste_row_img()
+                return
+        except Exception:
+            pass
         if md is not None and md.hasFormat(CB_ROWS_MIME):
             try:
                 payload = json.loads(bytes(md.data(CB_ROWS_MIME)).decode('utf-8'))
@@ -5750,6 +6098,22 @@ class MainWindow(QMainWindow):
         menu.addSeparator()
         menu.addAction('在此行打断分部（本行起归新分部）', self.split_section_at_row)
         menu.addSeparator()
+        # V3.7.5：图纸列右键专属操作（任意行也可用，作用于当前行）
+        im = menu.addMenu('图纸（当前行）')
+        im.addAction('截图选图纸…', self.capture_row_img)
+        im.addAction('选择图片文件…', self.pick_row_img)
+        im.addAction('粘贴剪贴板图片', self.paste_row_img)
+        row_img = None
+        if 0 <= self.table.currentRow() < len(self.current_section.rows):
+            row_img = getattr(self.current_section.rows[self.table.currentRow()], 'img', None)
+        im.addAction('放大查看', self.view_row_img)
+        act = im.addAction('另存为图片…', self.save_row_img)
+        act.setEnabled(bool(row_img))
+        act = im.addAction('清除图纸', self.clear_row_img)
+        act.setEnabled(bool(row_img))
+        im.addSeparator()
+        im.addAction('显示/隐藏右侧预览', self.toggle_img_panel)
+        menu.addSeparator()
         menu.addAction('清除单元格内容  (Delete)', self.delete_cells_data)
         menu.addAction('删除选中行', self.delete_rows)
         menu.addAction('粘贴（WPS / 外部数据 / 本表复制剪切）  (Ctrl+V)',
@@ -6011,7 +6375,7 @@ class MainWindow(QMainWindow):
         measure = getattr(fm, 'horizontalAdvance', None) or fm.width
         # 各列的“不低于”宽度：再挤也不能窄到看不清表头与数字
         MINW = {'code': 72, 'name': 96, 'part': 76, 'unit': 58, 'value': 86,
-                'remark': 80, 'no_count': 56}
+                'remark': 80, 'no_count': 56, 'img': 90}
         widths = []
         nrows = min(self.table.rowCount(), 300)
         for j, cd in enumerate(cols):

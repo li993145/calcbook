@@ -25,6 +25,7 @@ DEFAULT_COLUMNS = [
     {'key': 'unit', 'title': '单位', 'width': 80, 'builtin': True},
     {'key': 'value', 'title': '工程量', 'width': 100, 'builtin': True},
     {'key': 'formula', 'title': '计算公式', 'width': 600, 'builtin': True},
+    {'key': 'img', 'title': '图纸', 'width': 110, 'builtin': True},
     {'key': 'drawing_no', 'title': '图纸编号', 'width': 150, 'builtin': True},
     {'key': 'detail_source', 'title': '大样图来源', 'width': 150, 'builtin': True},
     {'key': 'no_count', 'title': '不计', 'width': 80, 'builtin': True},
@@ -48,7 +49,7 @@ def migrate_columns(cols):
         return [dict(c) for c in DEFAULT_COLUMNS]
     old = {str(c.get('key', '')): c for c in cols}
     if 'seq' in old or 'part' not in old:
-        return [dict(c) for c in cols]
+        return ensure_img_column([dict(c) for c in cols])
     result = []
     used = set()
     for dcol in DEFAULT_COLUMNS:
@@ -70,6 +71,25 @@ def migrate_columns(cols):
     for c in cols:
         if str(c.get('key', '')) not in used:
             result.append(dict(c))
+    return ensure_img_column(result)
+
+
+def ensure_img_column(cols):
+    """V3.7.5：老工程没有「图纸」列时，自动插到「计算公式」之后（数据不丢）。"""
+    if any(str(c.get('key', '')) == 'img' for c in cols):
+        return cols
+    result = []
+    pos = -1
+    for i, c in enumerate(cols):
+        result.append(dict(c))
+        if str(c.get('key', '')) == 'formula':
+            pos = len(result)
+    if pos < 0:
+        # 没有 formula 列就插在「图纸编号」前，再不行放最前
+        pos = next((i for i, c in enumerate(result)
+                    if str(c.get('key', '')) == 'drawing_no'), 0)
+    result.insert(pos, {'key': 'img', 'title': '图纸', 'width': 110,
+                        'builtin': True})
     return result
 
 
@@ -94,6 +114,7 @@ class Row:
         self.value = None
         self.error = None
         self.cleaned = ""
+        self.img = None            # V3.7.5 图纸：{'data':b64,'fmt','thumb':b64,'path','t'} 或 None
 
     def to_dict(self):
         d = dict(id=self.id, code=self.code, name=self.name, part=self.part,
@@ -104,6 +125,8 @@ class Row:
         d['cell_fill'] = self.cell_fill
         d['cell_font'] = self.cell_font
         d['cell_align'] = self.cell_align
+        if self.img:
+            d['img'] = self.img
         return d
 
     @classmethod
