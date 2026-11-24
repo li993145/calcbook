@@ -25,6 +25,10 @@ V3.7.10 起（修 bug）：
   这是"显示混乱"的最大来源）；
 - 分类汇总单独成表（分组 / 单位 / 条数 / 工程量合计），双击分组行看该组明细；
 - 汇总打印预览窗口与报表窗口同尺寸，工具条按钮全部中文。
+
+V3.7.11 起：
+- **打印预览两种模式都能用**：选「不汇总」时预览的是报表明细（按当前计算书 /
+  层级范围，带分部小计与总计），不再只能汇总才能预览。
 """
 
 import re as _re
@@ -175,10 +179,11 @@ class ReportViewerDialog(QDialog):
         self.cb_regex_mode.setMinimumWidth(150)
         self.cb_regex_mode.currentIndexChanged.connect(self._on_scope_changed)
         grp.addWidget(self.cb_regex_mode)
-        self.btn_print_sum = QPushButton('打印汇总预览…')
-        self.btn_print_sum.clicked.connect(self._on_print_summary)
-        self.btn_print_sum.setToolTip('把当前分类汇总的结果按页面设置的纸张'
-                                      '分页打印预览')
+        self.btn_print_sum = QPushButton('打印预览…')
+        self.btn_print_sum.clicked.connect(self._on_print_preview)
+        self.btn_print_sum.setToolTip('预览当前报表：\n'
+                                      '· 选了「分类汇总」→ 预览汇总表；\n'
+                                      '· 选「不汇总」→ 预览报表明细（按当前计算书 / 层级范围）。')
         grp.addWidget(self.btn_print_sum)
         grp.addStretch(1)
         lay.addLayout(grp)
@@ -577,11 +582,11 @@ class ReportViewerDialog(QDialog):
                                              or '全部计算书'),
                           ''.join(rows_html), grand)), None
 
-    def _build_print_preview(self, printer, doc):
+    def _build_print_preview(self, printer, doc, title='打印预览'):
         """建打印预览窗：窗口与报表同尺寸、工具条按钮中文。"""
         from PyQt5.QtPrintSupport import QPrintPreviewDialog
         dlg = QPrintPreviewDialog(printer, self)
-        dlg.setWindowTitle('打印预览——工程量分类汇总表')
+        dlg.setWindowTitle(title)
         localize_print_preview(dlg)              # 工具条按钮中文化
         dlg.paintRequested.connect(lambda p: doc.print_(p))
         # 窗口大小与「查看报表」协调（Qt 默认只有 640×480，太小）
@@ -595,18 +600,111 @@ class ReportViewerDialog(QDialog):
             pass
         return dlg
 
-    def _on_print_summary(self):
-        """打印汇总预览：按页面设置的纸张分页预览/打印汇总表。"""
-        html, err = self._summary_html()
+    def _detail_html(self):
+        """不汇总时：把当前报表明细（按范围）转成 HTML，供打印预览。
+
+        V3.7.11：以前「不汇总」点打印预览只会弹「没有选择分类汇总列」，
+        现在两种模式都能预览 —— 汇总看汇总表，不汇总看明细表。
+        """
+        import html as _html
+        prec = getattr(self.win, 'precision', 3)
+        books = self._selected_books()
+        level = self.cb_level.currentData()
+        rows_html = []
+        grand = 0.0
+        grand_rows = 0
+
+        def walk(sec, depth=0):
+            rows_html.append(
+                '<tr><td colspan="%d" style="background:#fff2cc">'
+                '<b>%s%s</b></td></tr>'
+                % (len(self.COLS), '　' * depth, _html.escape(sec.name)))
+            for r in getattr(sec, 'rows', []) or []:
+                if getattr(r, 'total_row', False):
+                    continue          # 合计行不重复列（下面有小计）
+                val = '' if r.no_count else (
+                    fmt_num(r.value, precision_for_unit(r.unit, prec))
+                    if r.value is not None else '')
+                cells = [r.code or '', r.name or '', r.unit or '', val,
+                         r.formula or '', _row_field(r, 'drawing_no'),
+                         r.remark or '']
+                rows_html.append('<tr>' + ''.join(
+                    '<td>%s</td>' % _html.escape(str(c)) for c in cells) + '</tr>')
+            # 小计只算本分部自己的行（与打印出来的计算书一致，不含下级，
+            # 否则上级小计与下级小计会重复显示同一个数）
+            t = sec.total()
+            if t is not None:
+                rows_html.append(
+                    '<tr style="background:#e2efda">'
+                    '<td colspan="3" align="right"><b>小计</b></td>'
+                    '<td align="right"><b>%s</b></td>'
+                    '<td colspan="3"></td></tr>'
+                    % fmt_num(t, section_precision(sec, prec)))
+            for c in getattr(sec, 'children', []) or []:
+                walk(c, depth + 1)
+
+        if level is None or level < 0:
+            for book in books:
+                walk(book, 0)
+        else:
+            for book in books:
+                for node in self._nodes_at_depth(book, level):
+                    walk(node, 0)
+        grand, grand_rows = self._node_total_of(books, level)
+        scope = self.cb_book.currentText() or '全部计算书'
+        if level is not None and level >= 0:
+            scope += ' · %s' % (self.cb_level.currentText() or '')
+        headers = ''.join('<th align="left">%s</th>' % h for h in self.COLS)
+        return (
+            '<h2 style="font-family:sans-serif">工程量明细报表</h2>'
+            '<p style="color:#444">汇总范围：%s ｜ 共 %d 条计算式</p>'
+            '<table width="100%%" border="1" cellspacing="0" cellpadding="4" '
+            'style="border-collapse:collapse;font-size:9pt">'
+            '<tr style="background:#eef2f7">%s</tr>'
+            '%s'
+            '<tr style="background:#e2efda"><th align="left">总计</th>'
+            '<th></th><th></th><th align="right">%.3f</th>'
+            '<th></th><th></th><th></th></tr>'
+            '</table>'
+            % (_html.escape(scope), grand_rows, headers,
+               ''.join(rows_html), grand)), None
+
+    def _node_total_of(self, books, level):
+        """范围内（计算书 × 层级）的合计与条数。"""
+        total, cnt = 0.0, 0
+        if level is None or level < 0:
+            for b in books:
+                t, c = self._node_total(b)
+                total += t
+                cnt += c
+        else:
+            for b in books:
+                for node in self._nodes_at_depth(b, level):
+                    t, c = self._node_total(node)
+                    total += t
+                    cnt += c
+        return total, cnt
+
+    def _on_print_preview(self):
+        """打印预览：汇总模式预览汇总表；不汇总模式预览报表明细。"""
+        if self.cb_group.currentData():
+            html, err = self._summary_html()
+            title = '打印预览——工程量分类汇总表'
+        else:
+            html, err = self._detail_html()
+            title = '打印预览——工程量明细报表'
         if err:
-            QMessageBox.warning(self, '打印汇总预览', err)
+            QMessageBox.warning(self, '打印预览', err)
             return
         from PyQt5.QtGui import QTextDocument
         printer = self.win.make_printer()
         doc = QTextDocument()
         doc.setHtml(html)
-        dlg = self._build_print_preview(printer, doc)
+        dlg = self._build_print_preview(printer, doc, title)
         dlg.exec_()
+
+    # 兼容旧调用名
+    _on_print_summary = _on_print_preview
 
     # ---------------- 窗口大小 ----------------
     def _fit_to_editor(self):

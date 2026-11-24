@@ -13,7 +13,7 @@ from PyQt5.QtWidgets import (
     QGridLayout, QRadioButton, QButtonGroup, QColorDialog, QSizePolicy,
     QAbstractItemDelegate, QAbstractButton, QCheckBox, QStyle,
     QStyleOptionViewItem, QStyleOptionButton, QListWidget, QListWidgetItem,
-    QScrollArea, QGroupBox, QSpinBox
+    QScrollArea, QGroupBox, QSpinBox, QFontComboBox
 )
 from PyQt5.QtCore import (Qt, QSettings, QMimeData, QEvent, QTimer, QUrl, QRectF, QPointF,
                           QPoint, QSizeF, QRect, pyqtSignal, QObject, QItemSelectionModel,
@@ -41,7 +41,7 @@ from ui_drawing import (encode_img, decode_img, capture_region, img_size,
 APP_NAME = "工程量计算书"
 # 本表内部复制/剪切的结构化剪贴板格式（多行整行复制 → 粘到任意位置插入行，不覆盖已有数据）
 CB_ROWS_MIME = 'application/x-calcbook-rows'
-APP_VER = "3.7.10"
+APP_VER = "3.7.11"
 FILE_EXT = '.gcls'          # 工程文件后缀（内容仍是 JSON，便于排查与迁移）
 # V3.7.3：表格最大行列数与 WPS 表格一致（1048576 行 × 16384 列）
 MAX_ROWS = 1048576
@@ -2728,6 +2728,67 @@ class ReportSettingsDialog(QDialog):
         form.addRow('页脚中：', self.ed_footer_center)
         form.addRow('页脚右：', self.ed_footer_right)
 
+        # —— 页脚字体（V3.7.11：页脚/页码字号可自定义，默认与计算书字号一致）——
+        self.cb_footer_font = QFontComboBox()
+        self._footer_font_req = str(self.report.get('footer_font') or '微软雅黑')
+        try:
+            if self._footer_font_req in QFontDatabase().families():
+                self.cb_footer_font.setCurrentFont(QFont(self._footer_font_req))
+        except Exception:
+            pass
+        self.cb_footer_font.setMaximumWidth(240)
+        form.addRow('页脚字体：', self.cb_footer_font)
+        self.sp_footer_size = QDoubleSpinBox()
+        self.sp_footer_size.setRange(5.0, 40.0)
+        self.sp_footer_size.setDecimals(1)
+        self.sp_footer_size.setSingleStep(0.5)
+        self.sp_footer_size.setSuffix(' pt')
+        try:
+            _fsz = float(self.report.get('footer_font_size') or 9.0)
+        except (TypeError, ValueError):
+            _fsz = 9.0
+        self.sp_footer_size.setValue(_fsz)
+        self.sp_footer_size.setToolTip('页脚与页码的字号；默认 9pt，与计算书表格字号一致。')
+        form.addRow('页脚字号：', self.sp_footer_size)
+
+        # —— 打印页码范围（V3.7.11：系统打印框的页码范围之前不生效，这里再加一层）——
+        self.cb_prange = QComboBox()
+        self.cb_prange.addItem('全部页', 'all')
+        self.cb_prange.addItem('指定起止页', 'custom')
+        try:
+            _pf = int(self.report.get('print_from') or 0)
+            _pt = int(self.report.get('print_to') or 0)
+        except (TypeError, ValueError):
+            _pf = _pt = 0
+        self.cb_prange.setCurrentIndex(1 if (_pf > 0 or _pt > 0) else 0)
+        form.addRow('打印页码范围：', self.cb_prange)
+        prange_box = QWidget()
+        pg = QHBoxLayout(prange_box)
+        pg.setContentsMargins(0, 0, 0, 0)
+        self.sp_pfrom = QSpinBox()
+        self.sp_pfrom.setRange(1, 9999)
+        self.sp_pfrom.setValue(max(1, _pf or 1))
+        self.sp_pto = QSpinBox()
+        self.sp_pto.setRange(1, 9999)
+        self.sp_pto.setValue(max(1, _pt or 1))
+        pg.addWidget(QLabel('第'))
+        pg.addWidget(self.sp_pfrom)
+        pg.addWidget(QLabel('页 至 第'))
+        pg.addWidget(self.sp_pto)
+        pg.addWidget(QLabel('页'))
+        pg.addStretch(1)
+        self.sp_pfrom.setEnabled(self.cb_prange.currentData() == 'custom')
+        self.sp_pto.setEnabled(self.cb_prange.currentData() == 'custom')
+        self.cb_prange.currentIndexChanged.connect(
+            lambda _i: (self.sp_pfrom.setEnabled(self.cb_prange.currentData() == 'custom'),
+                        self.sp_pto.setEnabled(self.cb_prange.currentData() == 'custom')))
+        form.addRow('', prange_box)
+        tip_prange = QLabel('提示：系统打印窗口里的「页码范围」同样有效，两处取交集；'
+                            '选「全部页」即打印整本计算书。')
+        tip_prange.setStyleSheet('color:#777;font-size:9pt;')
+        tip_prange.setWordWrap(True)
+        form.addRow('', tip_prange)
+
         # —— 页边距：上下左右分别设置 ——
         margins = self.report.get('margins') or {}
         base = float(margins.get('left', self.report.get('margin', 1.9)))
@@ -2828,6 +2889,19 @@ class ReportSettingsDialog(QDialog):
                     'h': round(self.sp_ph.value(), 1)}
         return {'name': data[0], 'w': float(data[1]), 'h': float(data[2])}
 
+    def _footer_font_name(self):
+        """页脚字体名。
+
+        本机字库里没有这个字体时 QFontComboBox 会回退到别的字体，
+        这时要保留原来的名字（打印时 Qt 会自动替换显示）。
+        """
+        try:
+            if self._footer_font_req in QFontDatabase().families():
+                return self.cb_footer_font.currentFont().family()
+        except Exception:
+            pass
+        return self._footer_font_req
+
     def apply(self):
         paper = self.current_paper()
         orient = 'landscape' if self.cb_orient.currentText() == '横向' else 'portrait'
@@ -2843,6 +2917,12 @@ class ReportSettingsDialog(QDialog):
             'footer_left': self.ed_footer_left.text().strip(),
             'footer_center': self.ed_footer_center.text().strip(),
             'footer_right': self.ed_footer_right.text().strip(),
+            'footer_font': self._footer_font_name(),
+            'footer_font_size': float(self.sp_footer_size.value()),
+            'print_from': (int(self.sp_pfrom.value())
+                           if self.cb_prange.currentData() == 'custom' else 0),
+            'print_to': (int(self.sp_pto.value())
+                         if self.cb_prange.currentData() == 'custom' else 0),
             'margins': {
                 'top': min(self.sp_top.value(), max_tb),
                 'bottom': min(self.sp_bottom.value(), max_tb),
@@ -4565,9 +4645,10 @@ class MainWindow(QMainWindow):
         <ul>
         <li><b>打印 / 预览</b>：Ctrl+P 调出系统打印对话框，可选打印机、份数、页码范围，也可选“Microsoft Print to PDF”存成 PDF。「打印预览」按纸张实际比例分页显示，鼠标拖动页面上的蓝色虚线即可调整页边距，上方数值框同步更新；预览与实际打印的分页完全一致，<b>每页都会重复报表标题和表头行</b>。<b>V3.7.2 修复</b>：改用手动逐行分页（逐行测高、按页高装箱）——以前行落在页边界上会被从中间切开，长计算式印不全；现在<b>整行永远完整地待在同一页</b>，放不下就整行挪到下一页，实在高过一页的行会先自动缩字号，仍超页才拆成续页。</li>
         <li><b>长计算式不再被切一半（V3.7.1）</b>：计算式很长、在单元格里换行后高过整页时，打印会自动把<b>该行字号缩小</b>，保证<b>整行完整印在一页里</b>（以前是从页中间断开，看不全后半截）。缩过字号的行数会在打印完成后的状态栏提示。</li>
-        <li><b>页面设置</b>：可设表头标题、页眉、<b>页脚左 / 中 / 右三栏</b>（一般放编制人、复核人、日期等签字信息）、上 / 下 / 左 / 右页边距、纸张方向、纸张大小（下拉列出系统打印机支持的纸型，选“自定义”可填宽高 mm）、水平 / 垂直对齐。打印和预览每页底部自动显示「第 X 页，共 Y 页」，无需手动填页码。</li>
+        <li><b>页面设置</b>：可设表头标题、页眉、<b>页脚左 / 中 / 右三栏</b>（一般放编制人、复核人、日期等签字信息）、<b>页脚字体与字号</b>（系统字库；字号默认 9pt，与计算书表格字号相同）、上 / 下 / 左 / 右页边距、纸张方向、纸张大小（下拉列出系统打印机支持的纸型，选“自定义”可填宽高 mm）、水平 / 垂直对齐、<b>打印页码范围</b>（全部页 / 指定起止页）。打印和预览每页底部自动显示「第 X 页，共 Y 页」，无需手动填页码。<b>V3.7.11</b>：页脚以前用“点字号”绘制，打印机高分辨率再叠加缩放，页码会被放大十几倍（字特别大），现改为按像素换算，<b>预览与实际打印完全一致</b>。</li>
+        <li><b>打印页码范围（V3.7.11）</b>：系统打印窗口里的「页码范围」<b>现在真的生效</b>——以前手动逐页绘制时打印引擎不认这个范围（设成 1-1 照样整本全打），现在只打印范围内的页，页脚页码仍显示全文页号；「页面设置…」里的「打印页码范围」与系统设置<b>取交集</b>，打印完成后状态栏会说明本次打了第几页到第几页。</li>
         <li><b>打印区域</b>：在表格里框选单元格后<b>右键 →「设置打印区域」</b>，报表只输出选中的行列，小计也只算选中行；右键「清除打印区域」恢复打印整张计算书。快捷操作行的「打印选中区域」也可直接使用。</li>
-        <li><b>查看报表（V3.7.0；V3.7.9 增加分类汇总；V3.7.10 修正则口径）</b>：点「数据导出」页签或 Ribbon 的<b>「查看报表」</b>，弹出<b>表格化的工程量报表</b>：左边是计算书 / 单位 / 分部 / 分项的层级树，右边是编号、项目名称、单位、工程量、计算公式、图纸编号、备注，每个节点后面带合计，整体还有总计。<b>先在这里核对数据，确认没问题再打印或导出</b>，不用一进来就跳到打印预览。窗口底部可直接「刷新 / 打印 / 导出表格 / 页面设置」。<b>分类汇总（V3.7.9）</b>：顶部选「按清单编号 / 项目名称 / 计量单位 / 备注 / 图纸编号 / 自定义列」分组，每组小计工程量与条数，<b>双击分组行可看该组明细</b>；点<b>「打印汇总预览…」</b>把汇总表按页面设置的纸张分页打印预览（预览窗与报表窗口同尺寸、按钮全中文）。<br><b>分类汇总的正则（V3.7.10，与表格右键「筛选」完全同一口径）</b>：在<b>「正则列」</b>上做匹配，<b>命中的行才参与汇总、不命中的直接排除</b>（不再堆进「(未匹配)」组）；正则列默认跟随分类列，也可以单独指定（如按清单编号筛、按项目名称分组）；留空则按分类列的值相同归组。需要「按匹配内容归组」时把「方式」改成<b>「按正则提取分组名」</b>。<b>没填任何内容的空行不参与汇总</b>。</li>
+        <li><b>查看报表（V3.7.0；V3.7.9 增加分类汇总；V3.7.10 修正则口径）</b>：点「数据导出」页签或 Ribbon 的<b>「查看报表」</b>，弹出<b>表格化的工程量报表</b>：左边是计算书 / 单位 / 分部 / 分项的层级树，右边是编号、项目名称、单位、工程量、计算公式、图纸编号、备注，每个节点后面带合计，整体还有总计。<b>先在这里核对数据，确认没问题再打印或导出</b>，不用一进来就跳到打印预览。窗口底部可直接「刷新 / 打印 / 导出表格 / 页面设置」。<b>分类汇总（V3.7.9）</b>：顶部选「按清单编号 / 项目名称 / 计量单位 / 备注 / 图纸编号 / 自定义列」分组，每组小计工程量与条数，<b>双击分组行可看该组明细</b>；点<b>「打印预览…」</b>把结果按页面设置的纸张分页打印预览（预览窗与报表窗口同尺寸、按钮全中文）。<b>V3.7.11</b>：分类选「不汇总」时<b>也能预览</b>了——预览的是当前范围（计算书 × 层级）的<b>报表明细</b>，带分部小计与总计（以前不汇总点预览只会弹「没有选择分类汇总列」）。<br><b>分类汇总的正则（V3.7.10，与表格右键「筛选」完全同一口径）</b>：在<b>「正则列」</b>上做匹配，<b>命中的行才参与汇总、不命中的直接排除</b>（不再堆进「(未匹配)」组）；正则列默认跟随分类列，也可以单独指定（如按清单编号筛、按项目名称分组）；留空则按分类列的值相同归组。需要「按匹配内容归组」时把「方式」改成<b>「按正则提取分组名」</b>。<b>没填任何内容的空行不参与汇总</b>。</li>
         <li><b>报表范围可选（V3.7.1）</b>：查看报表窗口顶部多了两个下拉——<b>「计算书」</b>选看哪一本（全部计算书 / 指定计算书），<b>「层级」</b>选看哪一层（全部层级 / 只看「单位工程」层 / 只看「分部工程」层…）。选某一层时按层汇总，每个节点列出「本级 N 条 / 含下级 M 条」和工程量合计，一眼看清各层汇总。窗口<b>打开时自动放大到编辑区大小</b>，不用缩在角落里看；<b>所有列（含项目名称列）都能拖动改宽度</b>，每个单元格加了<b>浅灰虚线框</b>，行列边界清楚不费劲。</li>
         <li><b>导出</b>：Ribbon「导出表格」生成 .xlsx（WPS / Excel 都能打开），包含各计算书与常量表；页面设置中的页脚三栏和自动页码也会写入导出文件。</li>
         </ul>
@@ -8243,6 +8324,20 @@ class MainWindow(QMainWindow):
             center = str(rep.get('footer', '') or '')
         return left, center, right
 
+    def footer_font_spec(self):
+        """页脚字体（字体名, 磅）。
+
+        默认与计算书表格字号一致（表格是 9pt），页脚页码不再比正文大一号。
+        """
+        rep = self.project.report or {}
+        fam = str(rep.get('footer_font') or '微软雅黑')
+        try:
+            pt = float(rep.get('footer_font_size') or 9.0)
+        except (TypeError, ValueError):
+            pt = 9.0
+        pt = max(5.0, min(40.0, pt))
+        return fam, pt
+
     def report_head_html(self):
         """报表「头部」：报表页眉 + 标题 + 表头行 —— 每一页都会重复打印。"""
         rep = self.project.report or {}
@@ -8270,7 +8365,7 @@ class MainWindow(QMainWindow):
         从中间切开 —— Qt 富文本对放不进当页剩余空间的表格行是直接
         切半续到下一页的（实测），所以必须自己按行分页。
         """
-        from ui_printpreview import measure_table_h
+        from ui_printpreview import measure_table_h, footer_height_px
         va, ha = self._report_style()
         area = getattr(self, '_print_area', None)
         cols = self._active_columns()
@@ -8280,7 +8375,8 @@ class MainWindow(QMainWindow):
         avail_h = 0.0
         if content_w and content_h:
             head_h = measure_table_h(self.report_head_html(), content_w)
-            avail_h = max(60.0, float(content_h) - head_h - 30.0)
+            _fam, fpt = self.footer_font_spec()
+            avail_h = max(60.0, float(content_h) - head_h - footer_height_px(fpt))
         self._print_shrunk = 0
         self._print_oversize = 0
         # 行高缓存：同一行 HTML 反复刷新预览时不必重复建文档测量
@@ -8518,14 +8614,30 @@ class MainWindow(QMainWindow):
         printer = self.make_printer()
         dlg = QPrintDialog(printer, self)
         dlg.setWindowTitle('打印工程量计算书')
+        # 先算一次总页数，让系统打印对话框里的「页码范围」知道有几页
+        try:
+            est, _s = self.build_report_renderer(printer)
+            dlg.setMinMax(1, max(1, est.page_count))
+        except Exception:
+            pass
         if dlg.exec_() != QDialog.Accepted:
             return
         try:
-            pages = self.paint_report_to_printer(printer)
+            renderer, scale = self.build_report_renderer(printer)
+            lo, hi = self.resolve_print_range(printer, renderer.page_count, dlg)
+            pages = self.paint_report_to_printer(printer, renderer=renderer,
+                                                 scale=scale, dlg=dlg)
         except Exception as e:
             QMessageBox.warning(self, APP_NAME, '打印失败：%s' % e)
             return
-        msg = '已发送到打印机：%s（共 %d 页，每页都带表头）' % (printer.printerName(), pages)
+        if pages <= 0:
+            self.status.showMessage('本次没有可打印的页面（页码范围为空，请检查'
+                                    '系统打印窗口或页面设置里的页码范围）', 6000)
+            return
+        rng = '全部 %d 页' % renderer.page_count
+        if (lo, hi) != (1, renderer.page_count):
+            rng = '第 %d–%d 页（全文共 %d 页）' % (lo, hi, renderer.page_count)
+        msg = '已发送到打印机：%s（本次打印 %s）' % (printer.printerName(), rng)
         shrunk = getattr(self, '_print_shrunk', 0)
         over = getattr(self, '_print_oversize', 0)
         if shrunk:
@@ -8534,7 +8646,87 @@ class MainWindow(QMainWindow):
             msg += '；%d 行内容极长（即使缩小字号也超过一页）' % over
         self.status.showMessage(msg, 6000)
 
-    def paint_report_to_printer(self, printer):
+    def build_report_renderer(self, printer):
+        """按打印机可打印区构建报表渲染器（手动分页，每页都带表头）。
+
+        返回 (渲染器, 缩放系数)。缩放系数把「文档像素」换算成打印机像素：
+        Qt 富文本按屏幕逻辑 DPI 排 px，纸张可打印区要按 打印机DPI/屏幕DPI
+        折算，否则字号会被放大、表格列宽不够导致编号折行。
+        """
+        from ui_printpreview import ReportRenderer
+        scale = max(1.0, printer.resolution() / max(72.0, float(screen_dpi())))
+        rect = printer.pageRect()
+        cw = rect.width() / scale
+        ch = rect.height() / scale
+        fl, fc, fr = self.footer_fields()
+        ffam, fpt = self.footer_font_spec()
+        # 正文逐行装箱手动分页：整行绝不跨页；超页的行先缩字号，仍超才续页
+        body_rows = self.report_body_rows(cw, ch)
+        renderer = ReportRenderer(self.report_head_html(), None, cw, ch,
+                                  fl, fc, fr, show_page_no=True,
+                                  body_rows=body_rows,
+                                  table_open=self.report_table_open_html(),
+                                  footer_font=ffam, footer_pt=fpt)
+        return renderer, scale
+
+    def resolve_print_range(self, printer, total_pages, dlg=None):
+        """本次要打印的页码范围（1-based，闭区间）。
+
+        两个来源取交集：
+        1) 系统打印对话框里的「页码范围」（Windows 原生对话框会回写到
+           QPrintDialog，也可能回写到 QPrinter，两个都读，谁给了范围算谁的）；
+        2) 页面设置里自己记的打印范围（print_from / print_to，0 表示不限）。
+        手动逐页绘制时打印引擎**不认**这些范围（实测：设 1-1 仍打印全部），
+        所以必须自己过滤 —— 这就是「设置只打印一页却全打印了」的根因。
+        """
+        total = max(1, int(total_pages))
+        lo, hi = 1, total
+        # 1a) 打印对话框自己的状态（Windows 原生对话框写在这里）
+        #     注意：QPrintDialog 用的是 QAbstractPrintDialog.PrintRange，
+        #     与 QPrinter.PrintRange 的成员顺序不同，不能直接比较！
+        try:
+            from PyQt5.QtPrintSupport import QAbstractPrintDialog
+            if dlg is not None:
+                drng = dlg.printRange()
+                if drng == QAbstractPrintDialog.PageRange:
+                    f, t = int(dlg.fromPage()), int(dlg.toPage())
+                    if f > 0:
+                        lo = max(lo, f)
+                    if t > 0:
+                        hi = min(hi, t)
+                elif drng == QAbstractPrintDialog.CurrentPage:
+                    lo = hi = 1
+        except Exception:
+            pass
+        # 1b) 打印机上的状态（有些平台 / 驱动写在这里）
+        try:
+            from PyQt5.QtPrintSupport import QPrinter
+            prng = printer.printRange()
+            if prng == QPrinter.PageRange:
+                f, t = int(printer.fromPage()), int(printer.toPage())
+                if f > 0:
+                    lo = max(lo, f)
+                if t > 0:
+                    hi = min(hi, t)
+            elif prng == QPrinter.CurrentPage:
+                lo = hi = 1
+        except Exception:
+            pass
+        rep = self.project.report or {}
+        try:
+            f = int(rep.get('print_from') or 0)
+            t = int(rep.get('print_to') or 0)
+        except (TypeError, ValueError):
+            f = t = 0
+        if f > 0:
+            lo = max(lo, f)
+        if t > 0:
+            hi = min(hi, t)
+        if hi < lo:
+            return lo, lo - 1        # 两处范围没有交集：本次不打印
+        return lo, min(hi, total)
+
+    def paint_report_to_printer(self, printer, renderer=None, scale=None, dlg=None):
         """逐页绘制到打印机：每页先画表头，再画该页正文。
 
         Qt 富文本不支持跨页重复表头（<thead> 只在表格顶部出现），
@@ -8543,31 +8735,29 @@ class MainWindow(QMainWindow):
         Qt 富文本按“屏幕逻辑 DPI”排 px（本机 150% 缩放时为 144dpi），
         所以纸张可打印区要按 打印机DPI/屏幕DPI 折算成文档 px 宽度，
         否则字号会被放大 1.5 倍、表格列宽不够导致编号折行。
+
+        只打印「页码范围」内的页（见 resolve_print_range）。
         """
         from PyQt5.QtGui import QPainter
-        from ui_printpreview import ReportRenderer
-        scale = max(1.0, printer.resolution() / max(72.0, float(screen_dpi())))
-        rect = printer.pageRect()
-        cw = rect.width() / scale
-        ch = rect.height() / scale
-        fl, fc, fr = self.footer_fields()
-        # 正文逐行装箱手动分页：整行绝不跨页；超页的行先缩字号，仍超才续页
-        body_rows = self.report_body_rows(cw, ch)
-        renderer = ReportRenderer(self.report_head_html(), None, cw, ch,
-                                  fl, fc, fr, show_page_no=True,
-                                  body_rows=body_rows,
-                                  table_open=self.report_table_open_html())
+        if renderer is None:
+            renderer, scale = self.build_report_renderer(printer)
+        if scale is None:
+            scale = max(1.0, printer.resolution() / max(72.0, float(screen_dpi())))
+        lo, hi = self.resolve_print_range(printer, renderer.page_count, dlg)
+        if hi < lo:              # 页码范围为空：什么都不打
+            self._print_range = (lo, hi, renderer.page_count)
+            return 0
         painter = QPainter(printer)
         try:
             painter.scale(scale, scale)
-            for i in range(renderer.page_count):
-                if i:
+            for i in range(lo - 1, hi):
+                if i > lo - 1:
                     printer.newPage()
                 renderer.draw_page(painter, i, 0.0, 0.0)
         finally:
             painter.end()
-        return renderer.page_count
-        self.status.showMessage('已发送到打印机：%s' % printer.printerName(), 5000)
+        self._print_range = (lo, hi, renderer.page_count)
+        return max(0, hi - lo + 1)
 
     def insert_symbol(self, ch):
         """把特殊字符插入到当前输入位置（内联编辑器 / 公式辅助框 / 单元格）。"""

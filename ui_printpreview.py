@@ -29,6 +29,33 @@ def px_per_cm():
     注意：必须在 QApplication 建好之后调用（导入时取不到真实 DPI）。
     """
     return _screen_dpi() / 2.54
+
+
+def doc_px_per_pt():
+    """1 磅对应多少文档像素（文档像素基准 = 屏幕逻辑 DPI）。
+
+    页脚字号必须先换算成**像素**再用：QFont 的「点字号」是按**绘图设备**的 DPI
+    解析的 —— 打印机是 1200dpi，点字号一下就变成 150 像素高，再叠加
+    painter.scale()（打印机 DPI ÷ 屏幕 DPI ≈ 8 倍），页脚页码会被放大十几倍，
+    印出来「字特别大」（V3.7.11 修的就是这个）。
+    换成像素字号后，预览与实际打印的页脚大小完全一致。
+    """
+    return _screen_dpi() / 72.0
+
+
+def footer_font_px(pt=9.0):
+    """页脚字号（磅）→ 像素。"""
+    try:
+        v = float(pt)
+    except (TypeError, ValueError):
+        v = 9.0
+    return max(6, int(round(v * doc_px_per_pt())))
+
+
+def footer_height_px(pt=9.0):
+    """页脚占用高度（文档像素）：略高于字号，上下留一点白。"""
+    return max(30.0, footer_font_px(pt) * 2.0)
+
 # 默认纸张 A4（mm）；实际纸张可由页面设置选择（跟随系统打印机支持的纸型）
 DEFAULT_PAPER = (210.0, 297.0)
 
@@ -85,16 +112,24 @@ class ReportRenderer:
 
     def __init__(self, head_html, body_html, content_w, content_h,
                  footer_left='', footer_center='', footer_right='', show_page_no=True,
-                 body_rows=None, table_open=''):
+                 body_rows=None, table_open='', footer_font='微软雅黑', footer_pt=9.0):
         self.content_w = max(40.0, float(content_w))
         self.content_h = max(40.0, float(content_h))
         self.footer_left = footer_left or ''
         self.footer_center = footer_center or ''
         self.footer_right = footer_right or ''
         self.show_page_no = bool(show_page_no)
+        # 页脚字体：按像素画（见 doc_px_per_pt 的说明），预览与打印才一致
+        self.footer_font = str(footer_font or '微软雅黑')
+        try:
+            self.footer_pt = float(footer_pt or 9.0)
+        except (TypeError, ValueError):
+            self.footer_pt = 9.0
+        self.footer_px = footer_font_px(self.footer_pt)
         # 页脚占用正文可用高度，保证打印与预览都不会压到表格内容
-        self.footer_h = 30.0 if (self.footer_left or self.footer_center or
-                                 self.footer_right or self.show_page_no) else 0.0
+        self.footer_h = footer_height_px(self.footer_pt) if (
+            self.footer_left or self.footer_center or
+            self.footer_right or self.show_page_no) else 0.0
         # 正文每页的高度 = 可用高度 - 头部高度 - 页脚高度
         self.head = self._make_doc(head_html, QSizeF(self.content_w, max(self.content_h, 1000.0)))
         # 头部高度按 documentSize 量（含表格边框/内边距，块测量会少算几个像素）
@@ -218,12 +253,17 @@ class ReportRenderer:
         painter.restore()
 
     def _draw_footer(self, painter, index):
-        """页脚：左签字栏、中间页码、右签字栏。"""
+        """页脚：左签字栏、中间页码、右签字栏。
+
+        字号用**像素**（footer_px）而不是点字号：点字号按绘图设备 DPI 解析，
+        打印时会被放大十几倍（V3.7.11 修的「页码字特别大」）。
+        """
         y = self.content_h - self.footer_h
         third = self.content_w / 3.0
         painter.save()
         painter.setClipRect(QRectF(0, y, self.content_w, self.footer_h))
-        font = QFont('微软雅黑', 8)
+        font = QFont(self.footer_font)
+        font.setPixelSize(self.footer_px)
         painter.setFont(font)
         painter.setPen(QColor('#666666'))
         painter.drawText(QRectF(6, y, third - 12, self.footer_h),
@@ -313,6 +353,8 @@ class PageCanvas(QWidget):
         self.footer_center = ''
         self.footer_right = ''
         self.show_page_no = True
+        self.footer_font = '微软雅黑'
+        self.footer_pt = 9.0
         self.margins = {'top': 1.9, 'bottom': 1.9, 'left': 1.9, 'right': 1.9}
         self.landscape = False
         self.paper = DEFAULT_PAPER      # (宽mm, 高mm)
@@ -356,7 +398,8 @@ class PageCanvas(QWidget):
     def set_content(self, head_html, body_html, margins=None, landscape=False,
                     zoom=None, paper=None, footer_left='', footer_center='',
                     footer_right='', show_page_no=True,
-                    body_rows=None, table_open=''):
+                    body_rows=None, table_open='',
+                    footer_font='微软雅黑', footer_pt=9.0):
         self.head_html = head_html or ''
         self.body_html = body_html or ''
         self.body_rows = body_rows
@@ -365,6 +408,11 @@ class PageCanvas(QWidget):
         self.footer_center = footer_center or ''
         self.footer_right = footer_right or ''
         self.show_page_no = bool(show_page_no)
+        self.footer_font = str(footer_font or '微软雅黑')
+        try:
+            self.footer_pt = float(footer_pt or 9.0)
+        except (TypeError, ValueError):
+            self.footer_pt = 9.0
         if margins:
             self.margins = {k: float(margins.get(k, 1.9)) for k in ('top', 'bottom', 'left', 'right')}
         self.landscape = bool(landscape)
@@ -391,7 +439,8 @@ class PageCanvas(QWidget):
         self._renderer = ReportRenderer(
             self.head_html, self.body_html, cw, ch,
             self.footer_left, self.footer_center, self.footer_right, self.show_page_no,
-            body_rows=self.body_rows, table_open=self.table_open)
+            body_rows=self.body_rows, table_open=self.table_open,
+            footer_font=self.footer_font, footer_pt=self.footer_pt)
         self._content = (cw * self.zoom, ch * self.zoom)      # 设备像素
         self._page_count = self._renderer.page_count
         total_h = self._page_count * h + (self._page_count - 1) * self.GAP + 2 * self.PAD
@@ -672,6 +721,7 @@ class PrintPreviewPane(QWidget):
                                % (name, w_mm, h_mm,
                                   '横向' if rep.get('orientation') == 'landscape' else '纵向'))
         fl, fc, fr = self.win.footer_fields()
+        ffam, fpt = self.win.footer_font_spec()
         # 先把纸张/方向/页边距同步到画布，再按同一基准算可打印区，
         # 正文按真实页面高度把“高过整页”的行缩字号，保证整行印得全
         self.canvas.paper = (w_mm, h_mm)
@@ -685,7 +735,8 @@ class PrintPreviewPane(QWidget):
                                 paper=(w_mm, h_mm),
                                 footer_left=fl, footer_center=fc, footer_right=fr,
                                 show_page_no=True,
-                                body_rows=body_rows, table_open=table_open)
+                                body_rows=body_rows, table_open=table_open,
+                                footer_font=ffam, footer_pt=fpt)
         self._apply_zoom()
         # 首次显示时 viewport 尺寸还没定，等布局完成再按宽度适配一次
         QTimer.singleShot(0, self._apply_zoom)
