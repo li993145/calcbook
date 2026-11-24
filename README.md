@@ -231,14 +231,15 @@
 
 ### 方式一：直接下载可执行文件（推荐给非技术用户）
 
-下载 `CalcBook-v3.0.0.exe`（约 58MB），双击运行，免安装：
+下载 `CalcBook-v3.7.7.exe`（约 58MB），双击运行，免安装：
 
-- [Gitee Release（推荐国内用户，点附件下载）](https://gitee.com/li993145/calcbook/releases/tag/v3.0.0)
-- [GitHub Release](https://github.com/li993145/calcbook/releases/tag/v3.0.0)
+- [Gitee Release（推荐国内用户，点附件下载）](https://gitee.com/li993145/calcbook/releases/tag/v3.7.7)
+  - 直链：https://gitee.com/li993145/calcbook/releases/download/v3.7.7/CalcBook-v3.7.7.exe
+- [GitHub Release](https://github.com/li993145/calcbook/releases/tag/v3.7.7)
 
-> 本版本更新明细见 [RELEASE_NOTES_v3.0.0.md](RELEASE_NOTES_v3.0.0.md)。
+> 本版本更新明细见 [RELEASE_NOTES_v3.7.7.md](RELEASE_NOTES_v3.7.7.md)。
 >
-> 历史版本：[V2.10.0](https://gitee.com/li993145/calcbook/releases/tag/v2.10.0)（[更新明细](RELEASE_NOTES_v2.10.0.md)）、[V2.9.2](https://gitee.com/li993145/calcbook/releases/tag/v2.9.2)（[更新明细](RELEASE_NOTES_v2.9.2.md)）、[V2.9.1](https://gitee.com/li993145/calcbook/releases/tag/v2.9.1)（[更新明细](RELEASE_NOTES_v2.9.1.md)）、[V2.9.0](https://gitee.com/li993145/calcbook/releases/tag/v2.9.0)（[更新明细](RELEASE_NOTES_v2.9.0.md)）、[V2.8.3](https://gitee.com/li993145/calcbook/releases/tag/v2.8.3)（[更新明细](RELEASE_NOTES_v2.8.3.md)）、[V2.8.2](https://gitee.com/li993145/calcbook/releases/tag/v2.8.2)（[更新明细](RELEASE_NOTES_v2.8.2.md)）、[V2.8.1](https://gitee.com/li993145/calcbook/releases/tag/v2.8.1)（[更新明细](RELEASE_NOTES_v2.8.1.md)）、[V2.8.0](https://gitee.com/li993145/calcbook/releases/tag/v2.8.0)（[更新明细](RELEASE_NOTES_v2.8.0.md)）、[V2.7.3](https://gitee.com/li993145/calcbook/releases/tag/v2.7.3)（[更新明细](RELEASE_NOTES_v2.7.3.md)）、[V2.7.2](https://github.com/li993145/calcbook/releases/tag/v2.7.2)（[更新明细](RELEASE_NOTES_v2.7.2.md)）、[V2.7.1](https://github.com/li993145/calcbook/releases/tag/v2.7.1)（[更新明细](RELEASE_NOTES_v2.7.1.md)）、[V2.7.0](https://github.com/li993145/calcbook/releases/tag/v2.7.0)（[更新明细](RELEASE_NOTES_v2.7.0.md)）、[V2.6.0](https://github.com/li993145/calcbook/releases/tag/v2.6.0)（[更新明细](RELEASE_NOTES_v2.6.0.md)）、[V2.5.0](https://github.com/li993145/calcbook/releases/tag/v2.5.0)（[更新明细](RELEASE_NOTES_v2.5.0.md)）。
+> 历史版本：[V3.7.1](https://gitee.com/li993145/calcbook/releases/tag/v3.7.1)（[更新明细](RELEASE_NOTES_v3.7.1.md)）、[V3.7.0](https://gitee.com/li993145/calcbook/releases/tag/v3.7.0)（[更新明细](RELEASE_NOTES_v3.7.0.md)）、[V3.6.1](https://gitee.com/li993145/calcbook/releases/tag/v3.6.1)（[更新明细](RELEASE_NOTES_v3.6.1.md)）、[V3.6.0](https://gitee.com/li993145/calcbook/releases/tag/v3.6.0)（[更新明细](RELEASE_NOTES_v3.6.0.md)）、[V3.5.0](https://gitee.com/li993145/calcbook/releases/tag/v3.5.0)（[更新明细](RELEASE_NOTES_v3.5.0.md)）、[V3.4.1](https://gitee.com/li993145/calcbook/releases/tag/v3.4.1)（[更新明细](RELEASE_NOTES_v3.4.1.md)）、[V3.4.0](https://gitee.com/li993145/calcbook/releases/tag/v3.4.0)（[更新明细](RELEASE_NOTES_v3.4.0.md)）、[V3.3.0](https://gitee.com/li993145/calcbook/releases/tag/v3.3.0)（[更新明细](RELEASE_NOTES_v3.3.0.md)）、[V3.2.0](https://gitee.com/li993145/calcbook/releases/tag/v3.2.0)（[更新明细](RELEASE_NOTES_v3.2.0.md)）、[V3.1.0](https://gitee.com/li993145/calcbook/releases/tag/v3.1.0)（[更新明细](RELEASE_NOTES_v3.1.0.md)）、[V3.0.0](https://gitee.com/li993145/calcbook/releases/tag/v3.0.0)（[更新明细](RELEASE_NOTES_v3.0.0.md)）、[V2.10.0](https://gitee.com/li993145/calcbook/releases/tag/v2.10.0)（[更新明细](RELEASE_NOTES_v2.10.0.md)）、[V2.9.2](https://gitee.com/li993145/calcbook/releases/tag/v2.9.2)（[更新明细](RELEASE_NOTES_v2.9.2.md)）、[V2.9.1](https://gitee.com/li993145/calcbook/releases/tag/v2.9.1)（[更新明细](RELEASE_NOTES_v2.9.1.md)）、[V2.9.0](https://gitee.com/li993145/calcbook/releases/tag/v2.9.0)（[更新明细](RELEASE_NOTES_v2.9.0.md)）、[V2.8.3](https://gitee.com/li993145/calcbook/releases/tag/v2.8.3)（[更新明细](RELEASE_NOTES_v2.8.3.md)）、[V2.8.2](https://gitee.com/li993145/calcbook/releases/tag/v2.8.2)（[更新明细](RELEASE_NOTES_v2.8.2.md)）、[V2.8.1](https://gitee.com/li993145/calcbook/releases/tag/v2.8.1)（[更新明细](RELEASE_NOTES_v2.8.1.md)）、[V2.8.0](https://gitee.com/li993145/calcbook/releases/tag/v2.8.0)（[更新明细](RELEASE_NOTES_v2.8.0.md)）。
 
 ### 方式二：从源码运行
 
