@@ -28,6 +28,16 @@ class _MirrorTable(QTableWidget):
         super().__init__(0, 0, panes.t)
         self._panes = panes
 
+    def contextMenuEvent(self, ev):
+        """V3.7.4：冻结区右键 → 转发给主表的单元格右键菜单（以前无任何菜单）。"""
+        try:
+            t = self._panes.t
+            pos = t.viewport().mapFromGlobal(ev.globalPos())
+            t.customContextMenuRequested.emit(pos)
+            ev.accept()
+        except Exception:
+            pass
+
     def wheelEvent(self, ev):
         try:
             dx = ev.angleDelta().x()
@@ -48,6 +58,7 @@ class FrozenPanes(object):
         self.t = table
         self._rows = 0
         self._cols = 0
+        self._editing = False          # 主表正在编辑（镜像临时让位）
         self.fc = None   # 左侧冻结列镜像
         self.fr = None   # 顶部冻结行镜像
         self.fx = None   # 左上角交叉镜像
@@ -133,12 +144,14 @@ class FrozenPanes(object):
 
     def hide_for_edit(self):
         """主表进入冻结区编辑时隐藏镜像，编辑器才看得见。"""
+        self._editing = True
         for w in (self.fc, self.fr, self.fx):
             if w is not None:
                 w.hide()
 
     def show_after_edit(self):
         """编辑结束恢复镜像。"""
+        self._editing = False
         self.update_geometry()
 
     # ---- 内容 ----
@@ -220,15 +233,44 @@ class FrozenPanes(object):
 
     # ---- 同步 ----
 
+    def _keep_visible(self):
+        """V3.7.4：滚动时兜底恢复被意外隐藏的镜像（编辑让位期间除外）。"""
+        if self._editing:
+            return
+        for w in (self.fc, self.fr, self.fx):
+            if w is None:
+                continue
+            active = ((w is self.fc and self._cols > 0) or
+                      (w is self.fr and self._rows > 0) or
+                      (w is self.fx and self._rows > 0 and self._cols > 0))
+            if active and not w.isVisible():
+                w.show()
+                w.raise_()
+
+    def sync_one_height(self, r, h):
+        """V3.7.4：主表某一行行高变化 → 只同步镜像里该行的行高（省性能）。"""
+        if self._rows <= 0 and self._cols <= 0:
+            return
+        if self.fc is not None and self._cols > 0 and 0 <= r < self.fc.rowCount():
+            self.fc.setRowHeight(r, h)
+        if self.fr is not None and self._rows > 0 and r < self._rows:
+            self.fr.setRowHeight(r, h)
+        if self.fx is not None and self._rows > 0 and self._cols > 0 and r < self._rows:
+            self.fx.setRowHeight(r, h)
+        if r < self._rows:
+            self.update_geometry()
+
     def sync_v(self, value):
         """主表垂直滚动 → 冻结列镜像跟随。"""
         if self.fc is not None and self._cols > 0:
             self.fc.verticalScrollBar().setValue(int(value))
+            self._keep_visible()
 
     def sync_h(self, value):
         """主表水平滚动 → 冻结行镜像跟随。"""
         if self.fr is not None and self._rows > 0:
             self.fr.horizontalScrollBar().setValue(int(value))
+            self._keep_visible()
 
     def sync_widths(self):
         """主表列宽变化（拖动/自适应）后同步镜像列宽与几何。"""

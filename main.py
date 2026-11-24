@@ -39,7 +39,7 @@ from ui_report import ReportViewerDialog
 APP_NAME = "工程量计算书"
 # 本表内部复制/剪切的结构化剪贴板格式（多行整行复制 → 粘到任意位置插入行，不覆盖已有数据）
 CB_ROWS_MIME = 'application/x-calcbook-rows'
-APP_VER = "3.7.3"
+APP_VER = "3.7.4"
 FILE_EXT = '.gcls'          # 工程文件后缀（内容仍是 JSON，便于排查与迁移）
 # V3.7.3：表格最大行列数与 WPS 表格一致（1048576 行 × 16384 列）
 MAX_ROWS = 1048576
@@ -2438,12 +2438,17 @@ class SymbolPicker(QDialog):
 
 # 函数面板：分组、显示名、插入模板、插入后光标回退字符数
 FUNCTION_GROUPS = [
+    # V3.7.4：常量组挪到面板最上方（π 在面板左上角，一眼能看到）
+    ('常量', [
+        ('π', '圆周率', 'π', 0, 'π = 3.14159'),
+    ]),
     ('常用运算', [
         ('abs', '绝对值', 'abs()', 1, 'abs(-3) = 3'),
         ('round', '四舍五入', 'round()', 1, 'round(3.456,2) = 3.46'),
         ('ceil', '向上取整', 'ceil()', 1, 'ceil(2.1) = 3'),
         ('floor', '向下取整', 'floor()', 1, 'floor(2.9) = 2'),
-        ('power', '幂运算', 'power()', 1, 'power(2,3) = 8（也可写 2^3）'),
+        # V3.7.4：幂运算 power 取消（公式里直接写 2^3 即可），改为立方 cube
+        ('cube', '立方', 'cube()', 1, 'cube(3) = 27（也可写 3³ 或 3^3）'),
         ('sqr', '平方', 'sqr()', 1, 'sqr(3) = 9'),
         ('sqrt', '开平方', 'sqrt()', 1, 'sqrt(16) = 4（也可写 √16）'),
         ('√', '开方符号', '√()', 1, '√9 = 3、√(3+4)'),
@@ -2460,9 +2465,6 @@ FUNCTION_GROUPS = [
         ('min', '最小值', 'min()', 1, 'min(1,2,3) = 1'),
         ('sum', '求和', 'sum()', 1, 'sum(1,2,3) = 6'),
         ('avg', '求平均值', 'avg()', 1, 'avg(1,2,3) = 2'),
-    ]),
-    ('常量', [
-        ('π', '圆周率', 'π', 0, 'π = 3.14159'),
     ]),
     # V3.7.3：台体快捷公式——插入自带[中文说明]注释的模板，按位替换示例数字即可
     ('台体公式', [
@@ -2887,6 +2889,8 @@ class MainWindow(QMainWindow):
         self.custom_symbols = self._load_json('custom_symbols', [])
         self.project = Project('未命名工程')
         self.current_section = self.project.root
+        # V3.7.4：启动的空白工程也预置默认空行，表格一打开就有可输入区
+        self._apply_default_rows(self.project.root)
         self.current_file = None
         self.recent = self.settings.value('recent', [], type=list) or []
         self._loading = False
@@ -3025,6 +3029,18 @@ class MainWindow(QMainWindow):
         # 自动保存的三个值历史上是独立存的，这里合并进来，保证两处一致
         opt['autosave_enabled'] = bool(self.settings.value('autosave_enabled', False, type=bool))
         opt['autosave_min'] = int(self.settings.value('autosave_min', 5) or 5)
+        # V3.7.4：默认计算式个数 1 → 15 的一次性迁移——只迁移“还是老默认值 1”的设置，
+        # 用户自己改成过别的值（0 或 ≥2）不动
+        try:
+            if int(opt.get('default_rows', 1) or 0) == 1 \
+                    and not self.settings.value('default_rows_v374', False, type=bool):
+                opt['default_rows'] = 15
+                self.settings.setValue('default_rows_v374', True)
+                if isinstance(data, dict):
+                    data['default_rows'] = 15
+                    self.settings.setValue('options_json', json.dumps(data, ensure_ascii=False))
+        except Exception:
+            pass
         opt['autosave_dir'] = self.settings.value('autosave_dir', '', type=str) or ''
         return opt
 
@@ -3538,6 +3554,7 @@ class MainWindow(QMainWindow):
                     ('插入分部', 'add', self.insert_section_node, '', False),
                     ('添加分部', 'add', self.add_section_node, '', False),
                     ('用分部打新', 'copy', self.duplicate_section, '', False),
+                    ('分部打断', 'delete', self.split_section_at_row, '', False),
                 ]),
                 ('层级', [
                     ('上移', 'up', self.move_section_up, '', False),
@@ -3763,7 +3780,11 @@ class MainWindow(QMainWindow):
         th.setSectionResizeMode(0, QHeaderView.Interactive)
         self.tree.setColumnWidth(0, 220)
         # 导航栏（含表头）统一常规字重，不用加粗
-        self.tree.setStyleSheet('QHeaderView::section { font-weight: 400; }')
+        # V3.7.4：节点行高按名称字体实际高度收紧（以前默认行距偏大，一屏放不下几个节点）
+        _fm = self.tree.fontMetrics()
+        _ih = max(20, _fm.height() + 6)
+        self.tree.setStyleSheet('QHeaderView::section { font-weight: 400; }'
+                                'QTreeWidget::item { height: %dpx; }' % _ih)
         self.tree.setContextMenuPolicy(Qt.CustomContextMenu)
         self.tree.customContextMenuRequested.connect(self.tree_menu)
         self.tree.currentItemChanged.connect(self.on_tree_select)
@@ -3883,15 +3904,11 @@ class MainWindow(QMainWindow):
         self.table.horizontalHeader().sectionResized.connect(
             lambda *_: self.frozen.sync_widths())
         self.table.on_edit_begin = lambda idx: self.frozen.hide_for_edit()
-        self.table.itemDelegate().closeEditor.connect(
-            lambda *_: self._after_cell_editor_closed())
-        # 表格左上角（全选角）右键：删除全部数据 / 列宽行高自适应
-        corner = self.table.findChild(QAbstractButton)
-        if corner is not None:
-            corner.setToolTip('点击全选；右键可“删除全部数据”、设置列宽/行高自适应')
-            corner.setContextMenuPolicy(Qt.CustomContextMenu)
-            corner.customContextMenuRequested.connect(
-                lambda p, w=corner: self.corner_menu(w.mapToGlobal(p)))
+        # 表格左上角（全选角）右键菜单：首次在 refresh_table 里接线（见 _ensure_corner_menu）。
+        # V3.7.4 修复：以前只在 build_ui 时 findChild 一次，角标按钮当时可能还没被
+        # Qt 创建出来（或随后被重建），连接丢失 → 运行时右键角标毫无反应。
+        self._corner_btn = None
+        self._ensure_corner_menu()
         self.table.setAlternatingRowColors(True)
         self.table.setWordWrap(False)
         self.table.setSelectionBehavior(QAbstractItemView.SelectItems)
@@ -3901,6 +3918,14 @@ class MainWindow(QMainWindow):
                                    QAbstractItemView.EditKeyPressed)
         # 实时双向同步：公式列单元格编辑时逐字同步到辅助框
         self.table.setItemDelegate(LiveSyncDelegate(self))
+        # V3.7.4 修复：closeEditor 必须接在“最终使用”的代理上——以前接在默认代理
+        # 上（setItemDelegate 换成 LiveSyncDelegate 后旧连接失效），导致编辑过一次
+        # 单元格后冻结镜像被 hide_for_edit 隐藏且再也不恢复，滚动时冻结区消失。
+        self.table.itemDelegate().closeEditor.connect(
+            lambda *_: self._after_cell_editor_closed())
+        # V3.7.4：任一行行高变化（编辑换行/自适应/缩放）→ 同步冻结镜像该行行高
+        self.table.verticalHeader().sectionResized.connect(
+            lambda _log, _old, _new: self.frozen.sync_one_height(_log, _new))
         self.table.itemChanged.connect(self.on_cell_changed)
         self.table.currentCellChanged.connect(self.on_cell_cursor)
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
@@ -4334,6 +4359,8 @@ class MainWindow(QMainWindow):
         <li><b>「关于产品」页签（V3.7.2 新增入群反馈）</b>：有「使用说明 / 关于产品 / <b>入群反馈</b>」三个按钮。点「入群反馈」弹出 QQ 群卡片（群号 <b>763124073</b>），<b>群号自动复制到剪贴板</b>，也可一键尝试拉起 QQ 加群；加群可以反馈问题、提建议、获取最新版本。</li>
         <li><b>序号等列输入也居中（V3.7.3）</b>：序号 / 编号 / 单位 / 工程量默认居中的列，<b>双击进入输入时文字同样居中显示</b>（以前编辑框一律靠左，看着像没居中）。</li>
         <li><b>插入 / 添加行列可自定义数量（V3.7.3）</b>：插入行、添加计算式、添加列时都会先弹一个小对话框问<b>数量</b>（默认 1，<b>记住上次输入的值</b>，直接回车就是上次的数量）；一次添加多列时列名自动编号。最大行列数与 WPS 表格一致（1048576 行 × 16384 列）。</li>
+        <li><b>默认就有一片可输入的空行区（V3.7.4）</b>：新建工程 / 新建分部时，表格自动预置 <b>15 行空计算式</b>（个数可在「选项配置 → 分部 → 默认计算式个数」调整），打开就能直接填，不用先按回车或点“添加计算式”造行。</li>
+        <li><b>项目结构树行距收紧（V3.7.4）</b>：左侧导航的节点行高按名称字体实际高度显示，一屏能看到更多节点。</li>
         </ul>
 
         <h3 style="color:#2f5597;">三、项目结构与层级</h3>
@@ -4343,6 +4370,7 @@ class MainWindow(QMainWindow):
         <li>树右键：新建单项工程 / 新建下一级 / 新建同级 / 重命名 / 上移 / 下移 / 升级 / 降级 / 删除 / <b>复制本节点 / 粘贴为下级节点 / 粘贴为同级节点</b> / 层级设置 / 工程信息。右键会先选中该节点，不可用的项变灰；删除后可用 Ctrl+Z 撤销。</li>
         <li><b>节点复制粘贴（V3.7.0）</b>：计算书、单项工程、单位工程、分部工程、分项工程<b>任意层级</b>都能自由复制。右键「复制本节点」把该节点连同<b>全部下级节点和数据行</b>一起复制；换到别的节点上右键「粘贴为下级节点」或「粘贴为同级节点」即可粘贴，重名会自动加序号（如“单位工程1(2)”），粘贴出来的节点 id 全新、互不影响；树里按 Ctrl+C / Ctrl+V 同样可以复制粘贴。</li>
         <li><b>用分部打新（V3.7.1）</b>：Ribbon「编辑」组的<b>「用分部打新」</b>以当前选中的节点为模板复制一份（连同全部下级和数据行），重名自动加序号；<b>打完新会自动切到新节点、表格跟着显示新内容</b>，状态栏会告诉你打出了多少条计算式、几个下级节点。树里没选中节点时，会以「表格当前所在的节点」为模板。</li>
+        <li><b>分部打断（V3.7.4）</b>：把光标点到表格的某一行，右键选<b>「在此行打断分部」</b>（或 Ribbon「编辑」组的「分部打断」）——<b>本行起以下各行归入紧随其后的新分部</b>，新分部名称可改、重名自动加序号，打断后自动切到新分部继续填写；不用再去项目结构窗口新建节点、手动搬数据。可用 Ctrl+Z 撤销。</li>
         <li><b>撤销不再跳根目录（V3.7.1）</b>：在导航栏上做完操作后按 Ctrl+Z，<b>会回到操作前的那个节点</b>（以前会直接跳到根目录，还得重新一层层点回去）；Ctrl+Y 恢复时则回到操作后的新节点。</li>
         </ul>
 
@@ -4359,10 +4387,10 @@ class MainWindow(QMainWindow):
         <li><b>单位与小数位</b>：单位列是下拉框（可滚动选择，也可直接输入自定义单位），内置 m、m2、m3、kg、t、个、块、套、处、台、组、根、樘、座、件、项、台班、延长米、千块等。工程量小数位按单位自动决定：m / m2 / m3 / kg 保留 2 位，t 保留 3 位，个 / 块 / 套 / 处 / 台 / 组 取整，其他单位默认 3 位；表格、打印、Excel 导出口径一致。</li>
         <li><b>复制 / 剪切 / 粘贴</b>：单击选中即可 Ctrl+C 复制（不必进编辑态），双击 / F2 才编辑。框选区域 Ctrl+C 复制为 TSV，可直接粘到 WPS / Excel；<b>复制 / 粘贴按表头当前显示顺序读写，拖动列换位后也不会错列</b>。整行（可多选）复制 / 剪切后，Ctrl+V 粘到任意位置会<b>插入行、原有数据顺延，不覆盖</b>；只框选部分单元格再剪切时，<b>仅清空这些单元格，不删除整行</b>；右键「粘贴」同时支持 WPS 表格、外部文件文本和本表复制 / 剪切的数据（含字体、颜色、对齐）；所有操作可 Ctrl+Z 撤销。在最后一行按<b>回车</b>自动追加新行；粘贴超出末尾也会自动加行。</li>
         <li><b>清除内容 / 删除</b>：选中单元格（可多选）后按 <b>Delete</b> 或右键「清除单元格内容」，只清空内容、保留行列结构，可撤销；整行 / 整列选中时按 Delete 才删除整行 / 整列，结构删除也保留在专门的右键菜单里。</li>
-        <li><b>右键菜单</b>：单元格右键可插入行、清除内容、设置 / 清除打印区域、调整列宽行高、标记为不计、单元格对齐 / 字体 / 转半角；行号右键可插入 / 删除行、整行上色、本行对齐、冻结至本行；表头右键可添加 / 删除 / 重命名列、整列着色、整列对齐、冻结至本列；左上角角标右键可删除全部数据、行列宽高开关、全表对齐、全选、取消冻结。</li>
+        <li><b>右键菜单</b>：单元格右键可插入行、<b>在此行打断分部</b>、清除内容、设置 / 清除打印区域、调整列宽行高、标记为不计、单元格对齐 / 字体 / 转半角；行号右键可插入 / 删除行、<b>打断分部</b>、整行上色、本行对齐、冻结至本行；表头右键可添加 / 删除 / 重命名列、整列着色、整列对齐、冻结至本列；左上角角标右键可复制 / 粘贴 / 清除内容、删除全部数据、行列宽高开关、全表对齐、全选、取消冻结。</li>
         <li><b>填充颜色</b>：选中单元格或整行 / 整列后，点「格式」组「填充颜色」，选颜色和应用范围（整行 / 整列 / 仅选中单元格）。优先级为 单元格 &gt; 整行 &gt; 整列；「清除填充」按当前选择自动判断范围。颜色会带到打印、预览和 Excel。</li>
         <li><b>列宽 / 行高</b>：<b>默认自适应</b>——列宽按内容计算并铺满窗口，行高按内容撑高（长公式 / 长备注自动换行），无需手点。手动拖过列宽后自动列宽会关闭，可在左上角角标右键重新勾选「自动列宽 / 自动行高」恢复；把鼠标移到两列（或两行）表头之间的分隔线上<b>双击</b>可只自适应该列 / 该行。</li>
-        <li><b>冻结窗格</b>：右键行号「冻结至本行」/ 列头「冻结至本列」，可同时冻结行列；鼠标停在冻结区上滚轮照常滚动整表，冻结区外数据正常显示；冻结区单元格仍可双击编辑；左上角右键「取消全部冻结」。设置随工程保存。</li>
+        <li><b>冻结窗格</b>：右键行号「冻结至本行」/ 列头「冻结至本列」，可同时冻结行列；<b>滚动时冻结线以上 / 以左的部分始终固定显示，以下 / 以右的部分随鼠标滚动</b>（V3.7.4 修复：以前编辑过单元格后冻结区会消失不再显示）；冻结区右键也能弹出单元格菜单，双击冻结区单元格仍可编辑；左上角右键「取消全部冻结」。设置随工程保存。</li>
         <li><b>撤销 / 恢复、查找</b>：Ctrl+Z 撤销、Ctrl+Y 恢复，逐字输入公式只算一步；Ctrl+F 打开查找，可按编号 / 项目名称 / 单位 / 部位 / 计算公式 / 备注或「全部字段」搜索，回车逐个定位到对应行。<b>V3.7.1</b>：在导航栏上做完操作后撤销，<b>会回到操作前的那个节点</b>，不会跳到根目录。</li>
         <li><b>拖动填充柄（自动序号，V3.7.1 修正）</b>：选中单元格后右下角有蓝色小方块，按住向下 / 向右拖动即自动填充序号（纯数字等差递增、尾号数字自动进位、汉字 / 公式循环复制）。拖动时的<b>虚线框正好罩住要填充的区域</b>（以前会宽出一格，看着像拉到旁边的单元格），目标区还铺了一层淡蓝底色，一眼能看出要填到哪里。</li>
         <li><b>排序 / 筛选</b>：右键或工具栏「计算书编辑」可排序、筛选——先在窗口里选<b>筛选列</b>（选哪列就筛哪列，V3.5 修复）再选条件（等于 / 包含 / 数字比较 / 正则 / 按填充颜色等），只隐藏不删数据、刷新后保持、编辑数据后立即重算；比较时自动统一全 / 半角与空格（V3.6），例如 <code>Ａ－００１</code> 可用 <code>A-001</code> 筛到；内容留空或正则写错会明确提示。<b>取消筛选</b>有三个入口：筛选窗口内点「清除筛选」、工具栏「清除筛选」、右键「清除筛选」，点后立即恢复显示全部行。</li>
@@ -4375,7 +4403,7 @@ class MainWindow(QMainWindow):
         <li><b>基本运算</b>：+ - * / 与 × ÷ 均可，幂用 ^，如 <code>2^3</code>、<code>4×9.6×0.1</code>；支持上标 ² ³ 直接当乘方，如 <code>3³=27</code>。</li>
         <li><b>注释</b>：公式中的汉字、<code>[方括号]</code>、<code>{花括号}</code>内容自动忽略，如 <code>4×9.6[柱基预埋]</code> 只计算 4×9.6；方括号常用于写备注。</li>
         <li><b>常量</b>：@加名称，如 <code>@层高=3.6</code>。左下常量框为「常量代码 / 值 / 说明」三列，双击即可修改，不写 @ 会自动补上。常量全部自定义；需要钢筋单重时点「▾」→「插入常用钢筋单重（14 条模板）」，插入后可随意改删。公式里写 <code>@层高×4</code>、<code>@Φ8×12</code> 即可参与计算；引用未定义的常量，该行红色提示“未定义的常量：@xxx”。</li>
-        <li><b>函数</b>：ceil 向上取整、floor 向下取整、sqr 平方、sqrt 开平方、round 四舍五入、power(x,n) 幂、pi / π 圆周率、radians 角度转弧度、du 弧度转角度、abs 绝对值、max、min、sum、<b>avg 平均值</b>、sin、cos、tan。点「插入函数」弹出函数面板，点函数名即插入 <code>函数名()</code>，光标停在括号内，每个函数都有写法提示。</li>
+        <li><b>函数</b>：ceil 向上取整、floor 向下取整、sqr 平方、<b>cube 立方（V3.7.4 取代幂运算 power，幂可直接写 2^3）</b>、sqrt 开平方、round 四舍五入、<b>π 圆周率（在面板「常量」组，V3.7.4 起位于面板最上方）</b>、radians 角度转弧度、du 弧度转角度、abs 绝对值、max、min、sum、<b>avg 平均值</b>、sin、cos、tan。点「插入函数」弹出函数面板，点函数名即插入 <code>函数名()</code>，光标停在括号内，每个函数都有写法提示。</li>
         <li><b>台体快捷公式（V3.7.3）</b>：「插入函数」面板新增<b>台体公式</b>分组——四棱台 frustum4(下底长,下底宽,上底长,上底宽,高)、三棱台 frustum3(下三边,上三边,高)、圆台 frustum_c(下口半径,上口半径,高)、空心圆台 frustum_ring(外下,外上,内下,内上,高)。插入的模板自带 <code>[中文说明]</code> 注释（不参与计算），按位替换示例数字即可，参数含义一眼可见。</li>
         <li><b>括号快捷键</b>：F4 公式前插入 <code>()</code>、F5 插入点插入 <code>()</code>、F6 插入点插入 <code>[]</code>、F7 末尾追加 <code>[]</code>；在单元格里直接打字时也生效。</li>
         <li><b>特殊写法</b>：度分秒如 34°56′30″ 可直接计算；<code>√9=3</code>、<code>√(3+4)</code>、<code>2×√9</code> 均可；写在公式开头的钢筋规格（如 <code>Φ8@200 4×5</code>=20）不参与计算，旧写法 Φ² / Φ³ / Φ⁴ 仍兼容。<b>钢筋等级符号</b>请点「特殊符号」：面板里用 <b>TssdEng（探索者）字体的国标制图符号</b>（一级 HPB300 / 二级 HRB335 / 三级 HRB400 / 四级 HRB500），点击即插入公式；这些符号需 TssdEng 字体显示（软件已随包附带），本机没有该字体时该组会自动隐藏。</li>
@@ -4613,6 +4641,9 @@ class MainWindow(QMainWindow):
         if getattr(self, 'frozen', None) is not None:
             self.frozen.set_freeze(int(getattr(self.project, 'freeze_rows', 0) or 0),
                                    int(getattr(self.project, 'freeze_cols', 0) or 0))
+        # V3.7.4：角标右键菜单惰性接线（角标按钮可能此刻才被 Qt 创建出来）
+        if getattr(self, 'table', None) is not None:
+            self._ensure_corner_menu()
         self.lbl_status.setText('%s：%d 行' % (sec.name, len(sec.rows)))
         self.update_selection_stats()
         self.schedule_summary_refresh()
@@ -5717,6 +5748,8 @@ class MainWindow(QMainWindow):
         menu.addAction('在上方插入行', self.insert_row_above)
         menu.addAction('在下方插入行', self.insert_row_below)
         menu.addSeparator()
+        menu.addAction('在此行打断分部（本行起归新分部）', self.split_section_at_row)
+        menu.addSeparator()
         menu.addAction('清除单元格内容  (Delete)', self.delete_cells_data)
         menu.addAction('删除选中行', self.delete_rows)
         menu.addAction('粘贴（WPS / 外部数据 / 本表复制剪切）  (Ctrl+V)',
@@ -5766,6 +5799,7 @@ class MainWindow(QMainWindow):
         menu.addAction('在上方插入行', self.insert_row_above)
         menu.addAction('在下方插入行', self.insert_row_below)
         menu.addAction('在末尾追加行', self.append_rows_at_end)
+        menu.addAction('在此行打断分部（本行起归新分部）', self.split_section_at_row)
         menu.addSeparator()
         menu.addAction('删除本行', self.delete_rows)
         color_menu = menu.addMenu('本行底色')
@@ -5799,6 +5833,25 @@ class MainWindow(QMainWindow):
                            lambda r2=row: self.freeze_panes(r2 + 1, self.project.freeze_cols))
         menu.exec_(vh.mapToGlobal(pos))
 
+    def _ensure_corner_menu(self):
+        """表格左上角（全选角）右键菜单接线（V3.7.4 修复）。
+
+        角标按钮由 Qt 内部管理，可能在首次显示后才创建、甚至被重建；每次
+        refresh_table 都检查一遍：按按钮对象判断是否已接线，换新按钮自动重连。
+        """
+        try:
+            corner = self.table.findChild(QAbstractButton)
+        except Exception:
+            return
+        if corner is None or corner is getattr(self, '_corner_btn', None):
+            return
+        self._corner_btn = corner
+        corner.setToolTip('点击全选；右键可复制/粘贴/清除、删除全部数据、'
+                          '全表对齐、列宽/行高自适应、取消冻结')
+        corner.setContextMenuPolicy(Qt.CustomContextMenu)
+        corner.customContextMenuRequested.connect(
+            lambda p, w=corner: self.corner_menu(w.mapToGlobal(p)))
+
     def corner_menu(self, global_pos):
         """表格左上角（全选钮）右键：删除全部数据 + 整表列宽 / 行高自适应。"""
         menu = QMenu(self)
@@ -5830,6 +5883,17 @@ class MainWindow(QMainWindow):
         am.addAction('靠右对齐', lambda: self.align_all('right'))
         am.addSeparator()
         am.addAction('恢复默认对齐', lambda: self.align_all('default'))
+        menu.addSeparator()
+        # V3.7.4：角标菜单补上对单元格的操作（点角标全选后，右键角标即可直接批量操作）
+        menu.addAction('复制选中单元格  (Ctrl+C)', self.copy_cells)
+        menu.addAction('剪切选中行  (Ctrl+X)', self.cut_rows)
+        menu.addAction('粘贴（WPS / 外部数据 / 本表复制剪切）  (Ctrl+V)',
+                       self.paste_from_clipboard)
+        menu.addAction('清除单元格内容  (Delete)', self.delete_cells_data)
+        menu.addAction('删除选中行', self.delete_rows)
+        menu.addSeparator()
+        menu.addAction('填充颜色…', self.fill_color_dialog)
+        menu.addAction('清除填充', self.clear_fill)
         menu.addSeparator()
         # 冻结窗格（V3.2）
         if self.project.freeze_rows > 0 or self.project.freeze_cols > 0:
@@ -7480,6 +7544,7 @@ class MainWindow(QMainWindow):
         self.project = proj
         self.current_file = None
         self.current_section = self.project.root
+        self._apply_default_rows(self.project.root)   # V3.7.4：新建工程预置空行
         self._undo_stack.clear()
         self._redo_stack.clear()
         self._pending_undo = None
@@ -8505,8 +8570,10 @@ class MainWindow(QMainWindow):
         self.status.showMessage('已在末尾添加 %d 行计算式' % n, 2500)
 
     def _apply_default_rows(self, sec):
-        """新建节点时按「选项配置 → 分部 → 默认计算式个数」预置空行。"""
-        n = int(self.opt('default_rows', 1) or 0)
+        """新建节点时按「选项配置 → 分部 → 默认计算式个数」预置空行。
+        V3.7.4：默认从 1 提到 15——新分部打开表格就直接有一片可输入的空行区，
+        不用先按回车 / 点“添加计算式”造行（选项里仍可自行调整个数）。"""
+        n = int(self.opt('default_rows', 15) or 0)
         unit = self._auto_unit_for(sec)
         for _ in range(max(0, n)):
             r = Row()
@@ -8620,6 +8687,76 @@ class MainWindow(QMainWindow):
         self.status.showMessage(
             '已按「%s」打新为「%s」：%d 条计算式、%d 个下级节点，表格已切到新节点'
             % (sec.name, new.name, n_rows, n_kids), 6000)
+
+    def split_section_at_row(self, *args):
+        """分部打断（V3.7.4）：在表格当前行把本分部截成两段——
+
+        本行起以下各行归入紧随其后的新分部，不用再去项目结构窗口里
+        新建节点、再手动搬数据。打断后自动切到新分部继续填写。
+        """
+        sec = self.current_section
+        if sec is None:
+            return
+        rows = sec.rows
+        row = self.table.currentRow()
+        if len(rows) == 0:
+            QMessageBox.information(self, APP_NAME, '当前分部没有计算行，无需打断。\n'
+                                    '要新增分部请用「添加分部」。')
+            return
+        if row < 0:
+            row = 0
+        if row == 0:
+            QMessageBox.information(self, APP_NAME,
+                                    '请先把光标点到要打断的行上（该行起以下各行归入新分部）。\n'
+                                    '第一行打断会让原分部一行不剩，请从第二行起打断。')
+            return
+        if row >= len(rows):
+            QMessageBox.information(self, APP_NAME,
+                                    '光标在最后一行之后，以下没有可拆走的行。\n'
+                                    '要往后补一个新分部请用「添加分部」。')
+            return
+        name, ok = QInputDialog.getText(
+            self, '分部打断',
+            '在第 %d 行打断「%s」：本行起以下 %d 行将归入新分部。\n新分部名称：'
+            % (row + 1, sec.name, len(rows) - row),
+            QLineEdit.Normal, sec.name)
+        if not ok:
+            return
+        name = name.strip() or sec.name
+        self.push_undo('分部打断')
+        new = Section(name)
+        if self.project.is_book(sec):
+            new.parent = None
+            new.name = self._unique_book_name(name)
+            try:
+                idx = self.project.books.index(sec) + 1
+            except ValueError:
+                idx = len(self.project.books)
+            self.project.books.insert(idx, new)
+        else:
+            parent = sec.parent
+            new.parent = parent
+            new.name = self._unique_child_name(parent, name)
+            try:
+                idx = parent.children.index(sec) + 1
+            except ValueError:
+                idx = len(parent.children)
+            parent.children.insert(idx, new)
+        new.rows = rows[row:]
+        sec.rows = rows[:row]
+        col = self.table.currentColumn()
+        self.project.recalc()
+        self.refresh_tree()
+        self.refresh_table()
+        self.select_section(new)
+        try:
+            self.table.setCurrentCell(0, max(0, min(col, self.table.columnCount() - 1)))
+        except Exception:
+            pass
+        self._dirty = True
+        self.status.showMessage(
+            '已在该行打断：「%s」保留前 %d 行，「%s」接续后 %d 行，已切到新分部'
+            % (sec.name, len(sec.rows), new.name, len(new.rows)), 6000)
 
     def insert_annotation_label(self, *args):
         """注释标签：往当前行的备注里插入一个注释标记。"""

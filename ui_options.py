@@ -40,7 +40,7 @@ DEFAULT_OPTIONS = {
     'autosave_min': 3,
     'autosave_dir': '',
     # 分部
-    'default_rows': 1,              # 新建分部时预置的计算式行数
+    'default_rows': 15,             # 新建分部时预置的计算式行数（V3.7.4 从 1 提到 15）
     # 快速启动
     'autoload_last': False,         # 自动打开上次编辑工程
     'save_geometry': True,          # 记住上次关闭窗口大小及位置
@@ -69,7 +69,7 @@ def merged_options(raw):
     # 类型兜底（设置文件被手工改坏时也不崩）
     out['font_size'] = _as_int(out['font_size'], 9, 7, 20)
     out['autosave_min'] = _as_int(out['autosave_min'], 3, 1, 240)
-    out['default_rows'] = _as_int(out['default_rows'], 1, 0, 50)
+    out['default_rows'] = _as_int(out['default_rows'], 15, 0, 200)
     out['enter_dir'] = 'right' if str(out['enter_dir']) == 'right' else 'down'
     if not str(out['note_color']).startswith('#') or len(str(out['note_color'])) != 7:
         out['note_color'] = '#008000'

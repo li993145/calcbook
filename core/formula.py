@@ -200,6 +200,7 @@ FUNCTIONS = {
     'ceil': math.ceil,
     'floor': math.floor,
     'sqr': lambda x: x * x,
+    'cube': lambda x: x * x * x,   # V3.7.4：立方（面板上取代幂运算 power）
     'sqrt': math.sqrt,
     'round': round,
     'power': math.pow,
