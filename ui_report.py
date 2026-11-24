@@ -14,9 +14,17 @@ V3.7.1 起：
 V3.7.9 起：
 - 增加**分类汇总**：按清单编号 / 项目名称 / 计量单位 / 备注 / 图纸编号 /
   自定义列分组，每组小计工程量与条数；
-- 分组条件支持**正则匹配**（如 ^0304 把编码 0304 开头的归一组、
-  「门窗」把名称含门窗的归一组；有分组时取分组 1 作组名）；
 - 汇总结果可「打印汇总预览…」——按页面设置的纸张分页打印。
+
+V3.7.10 起（修 bug）：
+- **正则改成和「筛选」完全一样的口径**：正则命中才参与汇总，不命中的行
+  直接排除（不再塞进「(未匹配)」组里造成显示混乱）；正则可指定作用列
+  （默认跟随分类列），筛选列与分组列可以不同；
+- 保留「按正则提取分组名」高级模式（原来的按匹配内容归组）；
+- **全空行不再参与汇总**（默认 15 行空行以前会自成一组「(空) 共 15 条」，
+  这是"显示混乱"的最大来源）；
+- 分类汇总单独成表（分组 / 单位 / 条数 / 工程量合计），双击分组行看该组明细；
+- 汇总打印预览窗口与报表窗口同尺寸，工具条按钮全部中文。
 """
 
 import re as _re
@@ -24,15 +32,48 @@ import re as _re
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QBrush, QColor, QFont, QPen
 from PyQt5.QtWidgets import (
-    QAbstractItemView, QComboBox, QDialog, QDialogButtonBox, QHBoxLayout,
-    QHeaderView, QLabel, QLineEdit, QMenu, QMessageBox, QPushButton,
-    QStyledItemDelegate, QTreeWidget, QTreeWidgetItem, QVBoxLayout
+    QAbstractItemView, QAction, QComboBox, QDialog, QDialogButtonBox,
+    QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMenu, QMessageBox,
+    QPushButton, QStyledItemDelegate, QTableWidget, QTableWidgetItem,
+    QToolButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout
 )
 
 from core.units import precision_for_unit, section_precision, fmt_num
+# V3.7.10：正则口径与「筛选」完全一致（同一套 norm_text + filter_match）
+from ui_sortfilter import filter_match, norm_text
 
 
 LEVEL_COLORS = ['#1f3864', '#1f6f4a', '#9c4a1a', '#5b2a86', '#7a5c00', '#215b6b']
+
+# 打印预览工具条按钮中文化（Qt 未加载中文翻译时默认是英文）
+_PREVIEW_ZH = {
+    'Next page': '下一页', 'Previous page': '上一页',
+    'First page': '首页', 'Last page': '末页',
+    'Fit width': '按宽度显示', 'Fit page': '整页显示',
+    'Zoom in': '放大', 'Zoom out': '缩小',
+    'Portrait': '纵向', 'Landscape': '横向',
+    'Show single page': '单页显示', 'Show facing pages': '双页显示',
+    'Show overview of all pages': '总览所有页',
+    'Print': '打印', 'Page setup': '页面设置',
+}
+
+
+def localize_print_preview(dlg):
+    """把 QPrintPreviewDialog 的工具条按钮（Zoom in / Print…）改成中文。"""
+    try:
+        for act in dlg.findChildren(QAction):
+            zh = _PREVIEW_ZH.get(act.text())
+            if zh:
+                act.setText(zh)
+                act.setToolTip(zh)
+        for b in dlg.findChildren(QToolButton):
+            zh = _PREVIEW_ZH.get(b.text())
+            if zh:
+                b.setText(zh)
+                b.setToolTip(zh)
+    except Exception:
+        pass
+
 
 
 def _row_field(row, key):
@@ -61,6 +102,8 @@ class ReportViewerDialog(QDialog):
     """报表查看：树形列出整个工程的工程量数据，并给出各级合计。"""
 
     COLS = ['编号', '项目名称', '单位', '工程量', '计算公式', '图纸编号', '备注']
+    # V3.7.10：分类汇总模式单独一套表头（干净的一张小计表）
+    GROUP_COLS = ['分组', '单位', '条数', '工程量合计']
 
     def __init__(self, win, parent=None):
         super().__init__(parent)
@@ -72,7 +115,7 @@ class ReportViewerDialog(QDialog):
         lay.setContentsMargins(8, 8, 8, 8)
         lay.setSpacing(6)
 
-        # —— 顶部：范围选择 + 提示 ——
+        # —— 顶部第一行：范围选择 ——
         top = QHBoxLayout()
         top.addWidget(QLabel('计算书：'))
         self.cb_book = QComboBox()
@@ -83,32 +126,6 @@ class ReportViewerDialog(QDialog):
         self.cb_level.setMinimumWidth(150)
         top.addWidget(self.cb_level)
         top.addSpacing(10)
-        # —— V3.7.9 分类汇总 ——
-        top.addWidget(QLabel('分类汇总：'))
-        self.cb_group = QComboBox()
-        self.cb_group.addItem('不汇总', None)
-        for _k, _t in (('code', '清单编号'), ('name', '项目名称'),
-                       ('unit', '计量单位'), ('remark', '备注'),
-                       ('drawing_no', '图纸编号')):
-            self.cb_group.addItem(_t, _k)
-        self.cb_group.setMinimumWidth(100)
-        self.cb_group.currentIndexChanged.connect(self._on_scope_changed)
-        top.addWidget(self.cb_group)
-        self.ed_regex = QLineEdit()
-        self.ed_regex.setPlaceholderText('正则（可选，如 ^0304 或 门窗）')
-        self.ed_regex.setMaximumWidth(230)
-        self.ed_regex.setToolTip(
-            '分组条件支持正则匹配：取第一个匹配（若有分组则取分组 1）作组名。\n'
-            '例：^0304 → 清单编码 0304 开头的归一组；门窗 → 名称含“门窗”的归一组；\n'
-            '不匹配的行归「(未匹配)」，留空则按列值直接相同归组。')
-        self.ed_regex.textChanged.connect(self._on_scope_changed)
-        top.addWidget(self.ed_regex)
-        self.btn_print_sum = QPushButton('打印汇总预览…')
-        self.btn_print_sum.clicked.connect(self._on_print_summary)
-        self.btn_print_sum.setToolTip('把当前分类汇总的结果按页面设置的纸张'
-                                      '分页打印预览')
-        top.addWidget(self.btn_print_sum)
-        top.addSpacing(10)
         self.lb_range = QLabel('')
         self.lb_range.setStyleSheet('color:#444;')
         top.addWidget(self.lb_range)
@@ -117,6 +134,54 @@ class ReportViewerDialog(QDialog):
         self.lb_total.setStyleSheet('color:#1f5f99; font-weight:600;')
         top.addWidget(self.lb_total)
         lay.addLayout(top)
+
+        # —— 顶部第二行：分类汇总（V3.7.9 新增，V3.7.10 修正则口径）——
+        grp = QHBoxLayout()
+        grp.addWidget(QLabel('分类汇总：'))
+        self.cb_group = QComboBox()
+        self.cb_group.addItem('不汇总', None)
+        for _k, _t in (('code', '清单编号'), ('name', '项目名称'),
+                       ('unit', '计量单位'), ('remark', '备注'),
+                       ('drawing_no', '图纸编号')):
+            self.cb_group.addItem(_t, _k)
+        self.cb_group.setMinimumWidth(100)
+        self.cb_group.currentIndexChanged.connect(self._on_scope_changed)
+        grp.addWidget(self.cb_group)
+        grp.addWidget(QLabel('正则列：'))
+        self.cb_regex_col = QComboBox()
+        self.cb_regex_col.addItem('自动（跟随分类列）', '')
+        for _k, _t in (('code', '清单编号'), ('name', '项目名称'),
+                       ('unit', '计量单位'), ('formula', '计算公式'),
+                       ('remark', '备注')):
+            self.cb_regex_col.addItem(_t, _k)
+        self.cb_regex_col.setMinimumWidth(120)
+        self.cb_regex_col.currentIndexChanged.connect(self._on_scope_changed)
+        grp.addWidget(self.cb_regex_col)
+        grp.addWidget(QLabel('正则：'))
+        self.ed_regex = QLineEdit()
+        self.ed_regex.setPlaceholderText('与「筛选」一致：命中的行才参与汇总')
+        self.ed_regex.setMaximumWidth(240)
+        self.ed_regex.setToolTip(
+            '正则口径与表格右键「筛选」里的正则匹配完全一样：\n'
+            '· 在「正则列」上匹配，命中的行才参与汇总，不命中的直接排除；\n'
+            '· 留空则按分类列的值相同归组；\n'
+            '· 例：^0304 → 清单编号 0304 开头的；门窗 → 名称含“门窗”的。')
+        self.ed_regex.textChanged.connect(self._on_scope_changed)
+        grp.addWidget(self.ed_regex)
+        grp.addWidget(QLabel('方式：'))
+        self.cb_regex_mode = QComboBox()
+        self.cb_regex_mode.addItem('筛选匹配行（同筛选）', 'filter')
+        self.cb_regex_mode.addItem('按正则提取分组名', 'extract')
+        self.cb_regex_mode.setMinimumWidth(150)
+        self.cb_regex_mode.currentIndexChanged.connect(self._on_scope_changed)
+        grp.addWidget(self.cb_regex_mode)
+        self.btn_print_sum = QPushButton('打印汇总预览…')
+        self.btn_print_sum.clicked.connect(self._on_print_summary)
+        self.btn_print_sum.setToolTip('把当前分类汇总的结果按页面设置的纸张'
+                                      '分页打印预览')
+        grp.addWidget(self.btn_print_sum)
+        grp.addStretch(1)
+        lay.addLayout(grp)
 
         # —— 表格 ——
         self.tree = QTreeWidget()
@@ -141,6 +206,8 @@ class ReportViewerDialog(QDialog):
         self.tree.setColumnWidth(4, 320)
         self.tree.setColumnWidth(5, 110)
         self.tree.setColumnWidth(6, 160)
+        # V3.7.10：双击分组行看该组明细
+        self.tree.itemDoubleClicked.connect(self._on_group_double_clicked)
         lay.addWidget(self.tree, 1)
 
         # —— 底部按钮 ——
@@ -243,6 +310,22 @@ class ReportViewerDialog(QDialog):
             self.cb_group.setCurrentIndex(idx)
         self._loading = False
 
+    def _refresh_regex_col_box(self):
+        """正则列下拉框：内置几列 + 自定义列（保留当前选择）。"""
+        keep = self.cb_regex_col.currentData()
+        self._loading = True
+        while self.cb_regex_col.count() > 6:   # 自动 + 5 个内置
+            self.cb_regex_col.removeItem(self.cb_regex_col.count() - 1)
+        for cd in (self.win.project.columns or []):
+            if cd.get('builtin'):
+                continue
+            self.cb_regex_col.addItem(str(cd.get('title', '列')),
+                                      str(cd.get('key')))
+        idx = self.cb_regex_col.findData(keep)
+        if idx >= 0:
+            self.cb_regex_col.setCurrentIndex(idx)
+        self._loading = False
+
     def _scope_rows(self):
         """当前范围（计算书 × 层级）内的全部数据行（跳过合计行）。"""
         books = self._selected_books()
@@ -258,41 +341,123 @@ class ReportViewerDialog(QDialog):
                     rows.extend(node.rows)
         return [r for r in rows if not getattr(r, 'total_row', False)]
 
+    @staticmethod
+    def _is_blank_row(r):
+        """行是否「什么都没有」——默认那 15 行空行以前会自成一组「(空)」，
+        是分类汇总显示混乱的最大来源。V3.7.10 起空行不参与汇总。"""
+        if r.value is not None:
+            return False
+        for k in ('code', 'name', 'unit', 'formula', 'remark'):
+            if str(getattr(r, k, '') or '').strip():
+                return False
+        for v in (getattr(r, 'custom', {}) or {}).values():
+            if str(v or '').strip():
+                return False
+        return True
+
+    def _stat_rows(self):
+        """参与统计的行：范围内、跳过合计行与全空行。"""
+        return [r for r in self._scope_rows() if not self._is_blank_row(r)]
+
+    def _regex_col_key(self):
+        """正则作用列；为空表示跟随分类列。"""
+        k = self.cb_regex_col.currentData()
+        return str(k) if k else None
+
     def _build_groups(self):
-        """按当前分类字段（+可选正则）分组，返回 ([(组名, 行列表)...], 错误)。"""
+        """按当前分类字段（+可选正则）分组，返回 ([(组名, 行列表)...], 错误)。
+
+        V3.7.10：正则口径与「筛选」一致——
+        · 方式=筛选匹配行（默认）：在「正则列」上匹配，**命中的行才参与汇总**，
+          不命中的直接排除（不再归进「(未匹配)」组）；
+        · 方式=按正则提取分组名：保持旧行为，按匹配内容归组，
+          没匹配上的归「(未匹配)」。
+        """
         key = self.cb_group.currentData()
-        rx = None
+        if not key:
+            return None, '没有选择分类汇总列'
         pat = self.ed_regex.text().strip()
+        mode = self.cb_regex_mode.currentData() or 'filter'
+        rx = None
+        self._regex_error = ''
         if pat:
             try:
-                rx = _re.compile(pat)
+                rx = _re.compile(norm_text(pat))
             except _re.error as e:
-                return None, '正则表达式无效：%s' % e
+                # 正则写错：跟「筛选」一样不排除任何行，只提示一下
+                self._regex_error = ('正则表达式无效：%s（本次暂按全部统计）'
+                                     % e)
+                rx = None
+        rkey = self._regex_col_key() or key
         groups = {}
         order = []
-        for r in self._scope_rows():
-            txt = str(_row_field(r, key) or '').strip()
-            if rx is not None:
-                m = rx.search(txt)
-                g = None
+        matched = 0
+        for r in self._stat_rows():
+            gval = str(_row_field(r, key) or '').strip()
+            if rx is not None and mode == 'filter':
+                # 与筛选同一套口径：整行归一化后做 re.search
+                txt = str(_row_field(r, rkey) or '')
+                if not filter_match(txt, '', '正则匹配', pat):
+                    continue
+                matched += 1
+                g = gval
+            elif rx is not None and mode == 'extract':
+                m = rx.search(norm_text(gval))
                 if m:
-                    g = m.group(1) if m.groups() else m.group(0)
-                g = (g or '(未匹配)').strip() or '(未匹配)'
+                    g = (m.group(1) if m.groups() else m.group(0)) or '(未匹配)'
+                else:
+                    g = '(未匹配)'
             else:
-                g = txt or '(空)'
+                g = gval
+            g = g or '(空)'
             if g not in groups:
                 groups[g] = []
                 order.append(g)
             groups[g].append(r)
+        self._last_matched = matched
         return [(g, groups[g]) for g in order], None
 
+    @staticmethod
+    def _group_unit(rows):
+        """组内单位：只有一种就显示它；多种就都列出来（混单位的小计要当心）。"""
+        units = []
+        for r in rows:
+            u = (r.unit or '').strip()
+            if u and u not in units:
+                units.append(u)
+        return '/'.join(units), len(units) > 1
+
+    def _apply_tree_mode(self, group_mode):
+        """分组模式与普通报表模式的表头/列显隐切换。"""
+        if group_mode:
+            self.tree.setHeaderLabels(self.GROUP_COLS)
+            for i in range(len(self.GROUP_COLS), self.tree.columnCount()):
+                self.tree.setColumnHidden(i, True)
+            self.tree.setColumnWidth(0, 280)
+            self.tree.setColumnWidth(1, 110)
+            self.tree.setColumnWidth(2, 100)
+            self.tree.setColumnWidth(3, 150)
+        else:
+            self.tree.setHeaderLabels(self.COLS)
+            for i in range(len(self.GROUP_COLS), self.tree.columnCount()):
+                self.tree.setColumnHidden(i, False)
+            self.tree.setColumnWidth(0, 110)
+            self.tree.setColumnWidth(1, 260)
+            self.tree.setColumnWidth(2, 70)
+            self.tree.setColumnWidth(3, 110)
+            self.tree.setColumnWidth(4, 320)
+            self.tree.setColumnWidth(5, 110)
+            self.tree.setColumnWidth(6, 160)
+
     def _refresh_group_tree(self, prec):
-        """分类汇总模式：每组一个顶层节点（小计工程量/条数），可展开看明细。"""
-        from PyQt5.QtWidgets import QMessageBox  # noqa: F401（预留）
+        """分类汇总模式：一张干净的汇总表（分组 / 单位 / 条数 / 工程量合计），
+        双击某一行看该组明细。"""
         self.tree.clear()
+        self._apply_tree_mode(True)
         groups, err = self._build_groups()
         if err:
             self.lb_range.setText(err)
+            self.lb_range.setStyleSheet('color:#b03030;')
             self.lb_total.setText('')
             return
         label = self.cb_group.currentText()
@@ -301,39 +466,78 @@ class ReportViewerDialog(QDialog):
         txt = '分类汇总：按「%s」· %s' % (label, scope)
         if self.cb_level.currentData() not in (None, -1):
             txt += ' · %s' % (self.cb_level.currentText() or '')
-        if self.ed_regex.text().strip():
-            txt += ' · 正则：%s' % self.ed_regex.text().strip()
+        pat = self.ed_regex.text().strip()
+        total_rows = len(self._stat_rows())
+        if pat and (self.cb_regex_mode.currentData() or 'filter') == 'filter' \
+                and not self._regex_error:
+            rk = self._regex_col_key() or label
+            txt += ' · 正则「%s」筛出 %d / %d 条' % (
+                pat, getattr(self, '_last_matched', 0), total_rows)
+        elif pat and (self.cb_regex_mode.currentData() or 'filter') == 'extract':
+            txt += ' · 正则「%s」（提取分组名）' % pat
         self.lb_range.setText(txt)
-        grand, grand_rows = 0.0, 0
+        self.lb_range.setStyleSheet('color:#b03030;' if self._regex_error
+                                    else 'color:#444;')
+        if self._regex_error:
+            self.lb_range.setText(self._regex_error + '　' + txt)
+        grand = 0.0
+        grand_rows = 0
+        mixed = False
         for g, rows in groups:
             vals = [r.value for r in rows
                     if not r.no_count and r.value is not None]
             tot = sum(vals)
-            cnt = len(vals)
-            units = [r.unit for r in rows if r.unit]
-            unit = max(set(units), key=units.count) if units else ''
-            item = QTreeWidgetItem([g, '共 %d 条' % len(rows), unit,
-                                    fmt_num(tot, prec) if cnt else '', '', '', ''])
+            unit, is_mixed = self._group_unit(rows)
+            mixed = mixed or is_mixed
+            item = QTreeWidgetItem([g, unit, '共 %d 条' % len(rows),
+                                    fmt_num(tot, prec) if vals else ''])
             f = item.font(0)
             f.setBold(True)
             item.setFont(0, f)
             item.setForeground(0, QBrush(QColor('#1f5f99')))
             item.setForeground(3, QBrush(QColor('#1f5f99')))
-            for r in rows:
-                val = '' if r.no_count else (
-                    fmt_num(r.value, precision_for_unit(r.unit, prec))
-                    if r.value is not None else '')
-                sub = QTreeWidgetItem([r.code or '', r.name or '', r.unit or '',
-                                       val, r.formula or '',
-                                       _row_field(r, 'drawing_no'), r.remark or ''])
-                for c in range(self.tree.columnCount()):
-                    sub.setForeground(c, QBrush(QColor('#333333')))
-                item.addChild(sub)
+            if is_mixed:
+                item.setToolTip(0, '本组含多种计量单位（%s），小计仅供参考' % unit)
+                item.setForeground(1, QBrush(QColor('#b03030')))
+            item.setData(0, Qt.UserRole, rows)
             self.tree.addTopLevelItem(item)
-            item.setExpanded(True)
             grand += tot
-            grand_rows += cnt
-        self.lb_total.setText('合计：%.3f    共 %d 条计算式' % (grand, grand_rows))
+            grand_rows += len(rows)
+        tip = '合计：%.3f    共 %d 条' % (grand, grand_rows)
+        if mixed:
+            tip += '（有组含多种计量单位）'
+        self.lb_total.setText(tip)
+
+    def _on_group_double_clicked(self, item, col):
+        """双击分组行 → 看该组明细（普通报表模式下不做任何事）。"""
+        rows = item.data(0, Qt.UserRole)
+        if not isinstance(rows, list) or not rows:
+            return
+        dlg = QDialog(self)
+        dlg.setWindowTitle('分组明细 —— %s' % item.text(0))
+        dlg.resize(900, 460)
+        v = QVBoxLayout(dlg)
+        cols = ['编号', '项目名称', '单位', '工程量', '计算公式', '备注']
+        tb = QTableWidget(len(rows), len(cols))
+        tb.setHorizontalHeaderLabels(cols)
+        tb.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        tb.setSelectionBehavior(QAbstractItemView.SelectRows)
+        prec = getattr(self.win, 'precision', 3)
+        for i, r in enumerate(rows):
+            val = '' if r.no_count else (
+                fmt_num(r.value, precision_for_unit(r.unit, prec))
+                if r.value is not None else '')
+            for j, txt in enumerate([r.code or '', r.name or '', r.unit or '',
+                                     val, r.formula or '', r.remark or '']):
+                it = QTableWidgetItem(str(txt))
+                tb.setItem(i, j, it)
+        tb.resizeColumnsToContents()
+        v.addWidget(tb)
+        bb = QDialogButtonBox(QDialogButtonBox.Close)
+        bb.button(QDialogButtonBox.Close).setText('关闭')
+        bb.rejected.connect(dlg.reject)
+        v.addWidget(bb)
+        dlg.exec_()
 
     def _summary_html(self):
         """把分类汇总结果转成 HTML（供打印预览）。返回 (html, 错误)。"""
@@ -349,8 +553,7 @@ class ReportViewerDialog(QDialog):
                     if not r.no_count and r.value is not None]
             tot = sum(vals)
             grand += tot
-            units = [r.unit for r in rows if r.unit]
-            unit = max(set(units), key=units.count) if units else ''
+            unit, is_mixed = self._group_unit(rows)
             rows_html.append(
                 '<tr><td>%s</td><td align="center">%s</td>'
                 '<td align="center">%d</td><td align="right">%s</td></tr>'
@@ -365,14 +568,32 @@ class ReportViewerDialog(QDialog):
             '<p style="color:#444">%s ｜ 汇总范围：%s</p>'
             '<table width="100%%" border="1" cellspacing="0" cellpadding="4" '
             'style="border-collapse:collapse">'
-            '<tr style="background:#eef2f7"><th align="left">%s</th>'
+            '<tr style="background:#eef2f7"><th align="left">分组</th>'
             '<th>单位</th><th>条数</th><th align="right">工程量合计</th></tr>'
             '%s'
             '<tr><th align="left">总计</th><th></th><th></th>'
             '<th align="right">%.3f</th></tr>'
             '</table>' % (meta, _html.escape(self.cb_book.currentText()
                                              or '全部计算书'),
-                          label, ''.join(rows_html), grand)), None
+                          ''.join(rows_html), grand)), None
+
+    def _build_print_preview(self, printer, doc):
+        """建打印预览窗：窗口与报表同尺寸、工具条按钮中文。"""
+        from PyQt5.QtPrintSupport import QPrintPreviewDialog
+        dlg = QPrintPreviewDialog(printer, self)
+        dlg.setWindowTitle('打印预览——工程量分类汇总表')
+        localize_print_preview(dlg)              # 工具条按钮中文化
+        dlg.paintRequested.connect(lambda p: doc.print_(p))
+        # 窗口大小与「查看报表」协调（Qt 默认只有 640×480，太小）
+        w = max(self.width(), 1080)
+        h = max(self.height(), 680)
+        dlg.resize(w, h)
+        try:
+            g = self.geometry()
+            dlg.move(g.center().x() - w // 2, g.center().y() - h // 2)
+        except Exception:
+            pass
+        return dlg
 
     def _on_print_summary(self):
         """打印汇总预览：按页面设置的纸张分页预览/打印汇总表。"""
@@ -381,13 +602,10 @@ class ReportViewerDialog(QDialog):
             QMessageBox.warning(self, '打印汇总预览', err)
             return
         from PyQt5.QtGui import QTextDocument
-        from PyQt5.QtPrintSupport import QPrintPreviewDialog
         printer = self.win.make_printer()
         doc = QTextDocument()
         doc.setHtml(html)
-        dlg = QPrintPreviewDialog(printer, self)
-        dlg.setWindowTitle('打印预览——工程量分类汇总表')
-        dlg.paintRequested.connect(lambda p: doc.print_(p))
+        dlg = self._build_print_preview(printer, doc)
         dlg.exec_()
 
     # ---------------- 窗口大小 ----------------
@@ -412,13 +630,15 @@ class ReportViewerDialog(QDialog):
             pass
         self._fill_scope_boxes()
         self._refresh_group_box()
+        self._refresh_regex_col_box()
         self.tree.clear()
         proj = win.project
         prec = getattr(win, 'precision', 3)
-        # V3.7.9：选了分类字段 → 分组汇总视图（每组小计，可展开看明细）
+        # V3.7.9：选了分类字段 → 分组汇总视图（每组小计）
         if self.cb_group.currentData():
             self._refresh_group_tree(prec)
             return
+        self._apply_tree_mode(False)      # V3.7.10：普通报表模式恢复原表头
         books = self._selected_books()
         level = self.cb_level.currentData()
         if level is None:
