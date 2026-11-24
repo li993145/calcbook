@@ -41,7 +41,7 @@ from ui_drawing import (encode_img, decode_img, capture_region, img_size,
 APP_NAME = "工程量计算书"
 # 本表内部复制/剪切的结构化剪贴板格式（多行整行复制 → 粘到任意位置插入行，不覆盖已有数据）
 CB_ROWS_MIME = 'application/x-calcbook-rows'
-APP_VER = "3.7.11"
+APP_VER = "3.8"
 FILE_EXT = '.gcls'          # 工程文件后缀（内容仍是 JSON，便于排查与迁移）
 # V3.7.3：表格最大行列数与 WPS 表格一致（1048576 行 × 16384 列）
 MAX_ROWS = 1048576
@@ -2783,7 +2783,8 @@ class ReportSettingsDialog(QDialog):
             lambda _i: (self.sp_pfrom.setEnabled(self.cb_prange.currentData() == 'custom'),
                         self.sp_pto.setEnabled(self.cb_prange.currentData() == 'custom')))
         form.addRow('', prange_box)
-        tip_prange = QLabel('提示：系统打印窗口里的「页码范围」同样有效，两处取交集；'
+        tip_prange = QLabel('提示：系统打印窗口里的「页码范围」同样有效，并且会'
+                            '预填到这里；两处不一致时以系统打印窗口的选择为准。'
                             '选「全部页」即打印整本计算书。')
         tip_prange.setStyleSheet('color:#777;font-size:9pt;')
         tip_prange.setWordWrap(True)
@@ -4646,7 +4647,7 @@ class MainWindow(QMainWindow):
         <li><b>打印 / 预览</b>：Ctrl+P 调出系统打印对话框，可选打印机、份数、页码范围，也可选“Microsoft Print to PDF”存成 PDF。「打印预览」按纸张实际比例分页显示，鼠标拖动页面上的蓝色虚线即可调整页边距，上方数值框同步更新；预览与实际打印的分页完全一致，<b>每页都会重复报表标题和表头行</b>。<b>V3.7.2 修复</b>：改用手动逐行分页（逐行测高、按页高装箱）——以前行落在页边界上会被从中间切开，长计算式印不全；现在<b>整行永远完整地待在同一页</b>，放不下就整行挪到下一页，实在高过一页的行会先自动缩字号，仍超页才拆成续页。</li>
         <li><b>长计算式不再被切一半（V3.7.1）</b>：计算式很长、在单元格里换行后高过整页时，打印会自动把<b>该行字号缩小</b>，保证<b>整行完整印在一页里</b>（以前是从页中间断开，看不全后半截）。缩过字号的行数会在打印完成后的状态栏提示。</li>
         <li><b>页面设置</b>：可设表头标题、页眉、<b>页脚左 / 中 / 右三栏</b>（一般放编制人、复核人、日期等签字信息）、<b>页脚字体与字号</b>（系统字库；字号默认 9pt，与计算书表格字号相同）、上 / 下 / 左 / 右页边距、纸张方向、纸张大小（下拉列出系统打印机支持的纸型，选“自定义”可填宽高 mm）、水平 / 垂直对齐、<b>打印页码范围</b>（全部页 / 指定起止页）。打印和预览每页底部自动显示「第 X 页，共 Y 页」，无需手动填页码。<b>V3.7.11</b>：页脚以前用“点字号”绘制，打印机高分辨率再叠加缩放，页码会被放大十几倍（字特别大），现改为按像素换算，<b>预览与实际打印完全一致</b>。</li>
-        <li><b>打印页码范围（V3.7.11）</b>：系统打印窗口里的「页码范围」<b>现在真的生效</b>——以前手动逐页绘制时打印引擎不认这个范围（设成 1-1 照样整本全打），现在只打印范围内的页，页脚页码仍显示全文页号；「页面设置…」里的「打印页码范围」与系统设置<b>取交集</b>，打印完成后状态栏会说明本次打了第几页到第几页。</li>
+        <li><b>打印页码范围（V3.8 完善）</b>：系统打印窗口里的「页码范围」<b>真的生效</b>——以前手动逐页绘制时打印引擎不认这个范围（设成 1-1 照样整本全打），现在只打印范围内的页，页脚页码仍显示全文页号；<b>页面设置里的范围会预填到系统打印窗口</b>（打开就能看到，也能临时改），两处都设了时取交集，<b>互相矛盾时以系统打印窗口的选择为准</b>并在状态栏提示；打印完成后状态栏会说明本次打了第几页到第几页。「查看报表 → 打印预览」里的打印按钮也换成我们自己的打印窗口，同样支持页码范围。</li>
         <li><b>打印区域</b>：在表格里框选单元格后<b>右键 →「设置打印区域」</b>，报表只输出选中的行列，小计也只算选中行；右键「清除打印区域」恢复打印整张计算书。快捷操作行的「打印选中区域」也可直接使用。</li>
         <li><b>查看报表（V3.7.0；V3.7.9 增加分类汇总；V3.7.10 修正则口径）</b>：点「数据导出」页签或 Ribbon 的<b>「查看报表」</b>，弹出<b>表格化的工程量报表</b>：左边是计算书 / 单位 / 分部 / 分项的层级树，右边是编号、项目名称、单位、工程量、计算公式、图纸编号、备注，每个节点后面带合计，整体还有总计。<b>先在这里核对数据，确认没问题再打印或导出</b>，不用一进来就跳到打印预览。窗口底部可直接「刷新 / 打印 / 导出表格 / 页面设置」。<b>分类汇总（V3.7.9）</b>：顶部选「按清单编号 / 项目名称 / 计量单位 / 备注 / 图纸编号 / 自定义列」分组，每组小计工程量与条数，<b>双击分组行可看该组明细</b>；点<b>「打印预览…」</b>把结果按页面设置的纸张分页打印预览（预览窗与报表窗口同尺寸、按钮全中文）。<b>V3.7.11</b>：分类选「不汇总」时<b>也能预览</b>了——预览的是当前范围（计算书 × 层级）的<b>报表明细</b>，带分部小计与总计（以前不汇总点预览只会弹「没有选择分类汇总列」）。<br><b>分类汇总的正则（V3.7.10，与表格右键「筛选」完全同一口径）</b>：在<b>「正则列」</b>上做匹配，<b>命中的行才参与汇总、不命中的直接排除</b>（不再堆进「(未匹配)」组）；正则列默认跟随分类列，也可以单独指定（如按清单编号筛、按项目名称分组）；留空则按分类列的值相同归组。需要「按匹配内容归组」时把「方式」改成<b>「按正则提取分组名」</b>。<b>没填任何内容的空行不参与汇总</b>。</li>
         <li><b>报表范围可选（V3.7.1）</b>：查看报表窗口顶部多了两个下拉——<b>「计算书」</b>选看哪一本（全部计算书 / 指定计算书），<b>「层级」</b>选看哪一层（全部层级 / 只看「单位工程」层 / 只看「分部工程」层…）。选某一层时按层汇总，每个节点列出「本级 N 条 / 含下级 M 条」和工程量合计，一眼看清各层汇总。窗口<b>打开时自动放大到编辑区大小</b>，不用缩在角落里看；<b>所有列（含项目名称列）都能拖动改宽度</b>，每个单元格加了<b>浅灰虚线框</b>，行列边界清楚不费劲。</li>
@@ -8603,6 +8604,23 @@ class MainWindow(QMainWindow):
             pass    # 个别驱动不支持以上设置时用驱动默认值
         return printer
 
+    def prefill_print_dialog(self, dlg):
+        """把页面设置里的打印范围预填到系统打印窗口。
+
+        系统打印框的「页码范围」默认是「全部页」，用户不知道这里也能选范围；
+        预填之后打开就能看到当前范围，也能临时改成别的。
+        """
+        try:
+            from PyQt5.QtPrintSupport import QPrintDialog
+            af, at = self.app_print_range()
+            if af > 0 or at > 0:
+                dlg.setPrintRange(QPrintDialog.PageRange)
+                dlg.setFromTo(max(1, af or 1), max(1, at or 1))
+                return True
+        except Exception:
+            pass
+        return False
+
     def print_report(self):
         """连系统打印机真实打印（Ctrl+P）：每一页都带表头。"""
         try:
@@ -8620,6 +8638,8 @@ class MainWindow(QMainWindow):
             dlg.setMinMax(1, max(1, est.page_count))
         except Exception:
             pass
+        # 页面设置里指定了范围 → 预填到系统打印框（打开就能看到，也能临时改）
+        self.prefill_print_dialog(dlg)
         if dlg.exec_() != QDialog.Accepted:
             return
         try:
@@ -8638,6 +8658,8 @@ class MainWindow(QMainWindow):
         if (lo, hi) != (1, renderer.page_count):
             rng = '第 %d–%d 页（全文共 %d 页）' % (lo, hi, renderer.page_count)
         msg = '已发送到打印机：%s（本次打印 %s）' % (printer.printerName(), rng)
+        if getattr(self, '_print_range_conflict', False):
+            msg += '；系统打印框的范围与页面设置矛盾，已按系统打印框执行'
         shrunk = getattr(self, '_print_shrunk', 0)
         over = getattr(self, '_print_oversize', 0)
         if shrunk:
@@ -8669,62 +8691,91 @@ class MainWindow(QMainWindow):
                                   footer_font=ffam, footer_pt=fpt)
         return renderer, scale
 
-    def resolve_print_range(self, printer, total_pages, dlg=None):
-        """本次要打印的页码范围（1-based，闭区间）。
-
-        两个来源取交集：
-        1) 系统打印对话框里的「页码范围」（Windows 原生对话框会回写到
-           QPrintDialog，也可能回写到 QPrinter，两个都读，谁给了范围算谁的）；
-        2) 页面设置里自己记的打印范围（print_from / print_to，0 表示不限）。
-        手动逐页绘制时打印引擎**不认**这些范围（实测：设 1-1 仍打印全部），
-        所以必须自己过滤 —— 这就是「设置只打印一页却全打印了」的根因。
-        """
-        total = max(1, int(total_pages))
-        lo, hi = 1, total
-        # 1a) 打印对话框自己的状态（Windows 原生对话框写在这里）
-        #     注意：QPrintDialog 用的是 QAbstractPrintDialog.PrintRange，
-        #     与 QPrinter.PrintRange 的成员顺序不同，不能直接比较！
-        try:
-            from PyQt5.QtPrintSupport import QAbstractPrintDialog
-            if dlg is not None:
-                drng = dlg.printRange()
-                if drng == QAbstractPrintDialog.PageRange:
-                    f, t = int(dlg.fromPage()), int(dlg.toPage())
-                    if f > 0:
-                        lo = max(lo, f)
-                    if t > 0:
-                        hi = min(hi, t)
-                elif drng == QAbstractPrintDialog.CurrentPage:
-                    lo = hi = 1
-        except Exception:
-            pass
-        # 1b) 打印机上的状态（有些平台 / 驱动写在这里）
-        try:
-            from PyQt5.QtPrintSupport import QPrinter
-            prng = printer.printRange()
-            if prng == QPrinter.PageRange:
-                f, t = int(printer.fromPage()), int(printer.toPage())
-                if f > 0:
-                    lo = max(lo, f)
-                if t > 0:
-                    hi = min(hi, t)
-            elif prng == QPrinter.CurrentPage:
-                lo = hi = 1
-        except Exception:
-            pass
+    def app_print_range(self):
+        """页面设置里记的打印范围 (from, to)；(0, 0) 表示不限。"""
         rep = self.project.report or {}
         try:
             f = int(rep.get('print_from') or 0)
             t = int(rep.get('print_to') or 0)
         except (TypeError, ValueError):
             f = t = 0
-        if f > 0:
-            lo = max(lo, f)
-        if t > 0:
-            hi = min(hi, t)
+        return max(0, f), max(0, t)
+
+    def dialog_print_range(self, printer, dlg=None):
+        """系统打印窗口里用户选的页码范围 (from, to)；没选返回 (0, 0)。
+
+        Qt 的 Windows 原生打印对话框接受后，会把用户填的范围回写到
+        **QPrintDialog**（fromPage / toPage），**同时也写进 QPrinter**
+        （QPrinter::fromPage / toPage）—— 见 Qt 5.15 源码
+        qprintdialog_win.cpp 的 qt_win_read_back_PRINTDLGEX()。
+        两处都读，谁有值算谁的；「当前页」= 只打第 1 页。
+        """
+        lo = hi = 0
+        cur = False
+        try:
+            if dlg is not None:
+                from PyQt5.QtPrintSupport import QAbstractPrintDialog
+                if dlg.printRange() == QAbstractPrintDialog.CurrentPage:
+                    cur = True
+                lo, hi = int(dlg.fromPage()), int(dlg.toPage())
+        except Exception:
+            pass
+        try:
+            from PyQt5.QtPrintSupport import QPrinter
+            if printer.printRange() == QPrinter.CurrentPage:
+                cur = True
+            plo, phi = int(printer.fromPage()), int(printer.toPage())
+            if lo <= 0 and hi <= 0 and (plo > 0 or phi > 0):
+                lo, hi = plo, phi
+        except Exception:
+            pass
+        if cur:
+            return 1, 1
+        if lo <= 0 and hi <= 0:
+            return 0, 0
+        return lo, hi
+
+    def resolve_print_range(self, printer, total_pages, dlg=None):
+        """本次要打印的页码范围（1-based，闭区间）；hi < lo 表示本次不打印。
+
+        规则（V3.8）：
+        1. **系统打印窗口里选的「页码范围」优先** —— 那是用户当下的明确选择；
+        2. 页面设置里的「打印页码范围」作为默认值（系统框选「全部页」时用它）；
+        3. 两处都有时取交集；交集为空（互相矛盾）时以系统框为准并给出提示；
+        4. 「当前页」= 只打第 1 页；
+        5. 超出实际页数的部分夹到 [1, 总页数]。
+
+        手动逐页绘制时打印引擎**不认**页码范围（实测：设 1-1 仍打印全部），
+        所以必须自己过滤 —— 这就是「设置只打印一页却全打印了」的根因。
+        """
+        total = max(1, int(total_pages))
+        sys_lo, sys_hi = self.dialog_print_range(printer, dlg)
+        app_lo, app_hi = self.app_print_range()
+        has_sys = (sys_lo > 0 or sys_hi > 0)
+        has_app = (app_lo > 0 or app_hi > 0)
+        conflict = False
+        if has_sys:
+            lo = max(1, sys_lo)
+            hi = sys_hi if sys_hi > 0 else total
+        else:
+            lo, hi = 1, total
+        if has_app:
+            a_lo = app_lo if app_lo > 0 else 1
+            a_hi = app_hi if app_hi > 0 else total
+            if has_sys:
+                n_lo, n_hi = max(lo, a_lo), min(hi, a_hi)
+                if n_hi >= n_lo:
+                    lo, hi = n_lo, n_hi
+                else:
+                    conflict = True       # 两处矛盾：以系统打印框为准
+            else:
+                lo, hi = a_lo, a_hi
+        lo = max(1, min(lo, total))
+        hi = min(hi, total)
+        self._print_range_conflict = conflict
         if hi < lo:
             return lo, lo - 1        # 两处范围没有交集：本次不打印
-        return lo, min(hi, total)
+        return lo, hi
 
     def paint_report_to_printer(self, printer, renderer=None, scale=None, dlg=None):
         """逐页绘制到打印机：每页先画表头，再画该页正文。
@@ -8747,6 +8798,15 @@ class MainWindow(QMainWindow):
         if hi < lo:              # 页码范围为空：什么都不打
             self._print_range = (lo, hi, renderer.page_count)
             return 0
+        # 页码范围由我们自己过滤（逐页绘制时打印引擎不认范围），
+        # 所以先把打印机上的范围清掉 —— 否则导出 PDF 时引擎会再按范围
+        # 过滤一次，出现「要 3 页只出来 1 页」的双重过滤。
+        try:
+            from PyQt5.QtPrintSupport import QPrinter
+            printer.setPrintRange(QPrinter.AllPages)
+            printer.setFromTo(0, 0)
+        except Exception:
+            pass
         painter = QPainter(printer)
         try:
             painter.scale(scale, scale)
@@ -8758,6 +8818,82 @@ class MainWindow(QMainWindow):
             painter.end()
         self._print_range = (lo, hi, renderer.page_count)
         return max(0, hi - lo + 1)
+
+    def estimate_doc_pages(self, doc, printer):
+        """估算富文本文档按当前纸张分页后的页数。
+
+        QTextDocument 本身没分页时 pageCount() 恒为 1；真正打印时 Qt 会克隆
+        一份并按纸张分页，所以这里复制一份内容、按同样的纸张量一次页数
+        （实测与真实打印的页数一致）。
+        """
+        try:
+            from PyQt5.QtGui import QTextDocument
+            from PyQt5.QtCore import QSizeF
+            tmp = QTextDocument()
+            tmp.setHtml(doc.toHtml())
+            dpi = float(printer.logicalDpiX() or 96) or 96.0
+            scale = dpi / 96.0
+            tmp.setPageSize(QSizeF(printer.width() / scale, printer.height() / scale))
+            return max(1, int(tmp.pageCount()))
+        except Exception:
+            return 1
+
+    def print_document(self, printer, doc, title='打印', total=None):
+        """打印一个 QTextDocument（报表预览用），页码范围同样可控。
+
+        Qt 的 QTextDocument::print() 读的就是打印机上的 fromPage / toPage
+        （见 qtextdocument.cpp：``int fromPage = pd->fromPage;``），
+        所以把范围写回打印机即可生效 —— 原生打印机和导出 PDF 都一样，
+        不用自己逐页画。
+        """
+        try:
+            from PyQt5.QtPrintSupport import QPrintDialog, QPrinter
+        except Exception as e:
+            QMessageBox.warning(self, APP_NAME, '当前环境缺少打印组件：%s' % e)
+            return 0
+        dlg = QPrintDialog(printer, self)
+        dlg.setWindowTitle(title)
+        # 清掉打印机上残留的页码范围（预览渲染或上次打印可能留下值），
+        # 否则会被误当成「用户选的范围」
+        try:
+            printer.setPrintRange(QPrinter.AllPages)
+            printer.setFromTo(0, 0)
+        except Exception:
+            pass
+        if not total or int(total) <= 0:
+            total = self.estimate_doc_pages(doc, printer)
+        total = max(1, int(total))
+        try:
+            dlg.setMinMax(1, total)
+        except Exception:
+            pass
+        self.prefill_print_dialog(dlg)
+        if dlg.exec_() != QDialog.Accepted:
+            return 0
+        lo, hi = self.resolve_print_range(printer, total, dlg)
+        if hi < lo:
+            self.status.showMessage('本次没有可打印的页面（页码范围为空）', 5000)
+            return 0
+        self.print_document_with_range(printer, doc, lo, hi)
+        msg = '已发送到打印机：%s（本次打印第 %d–%d 页，全文共 %d 页）' % (
+            printer.printerName(), lo, hi, total)
+        self.status.showMessage(msg, 6000)
+        return hi - lo + 1
+
+    def print_document_with_range(self, printer, doc, lo, hi):
+        """把 QTextDocument 按 [lo, hi] 页范围打印出去。
+
+        Qt 的 QTextDocument::print() 读打印机上的 fromPage / toPage
+        （qtextdocument.cpp：``int fromPage = pd->fromPage;``），
+        所以只要把范围写回打印机就生效 —— 原生打印机、导出 PDF 都一样。
+        """
+        try:
+            from PyQt5.QtPrintSupport import QPrinter
+            printer.setPrintRange(QPrinter.PageRange)
+            printer.setFromTo(int(lo), int(hi))
+        except Exception:
+            pass
+        doc.print_(printer)
 
     def insert_symbol(self, ch):
         """把特殊字符插入到当前输入位置（内联编辑器 / 公式辅助框 / 单元格）。"""

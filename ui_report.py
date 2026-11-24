@@ -29,6 +29,11 @@ V3.7.10 起（修 bug）：
 V3.7.11 起：
 - **打印预览两种模式都能用**：选「不汇总」时预览的是报表明细（按当前计算书 /
   层级范围，带分部小计与总计），不再只能汇总才能预览。
+
+V3.8 起：
+- **预览窗的打印换成我们自己的打印窗口**：Qt 自带的打印按钮走它内部的打印框，
+  页码范围既拿不到也没法预填（已隐藏），改由预览窗底部的「打印…」按钮调起
+  我们的打印窗口 —— 同样支持页码范围，打印后状态栏说明本次打了第几页。
 """
 
 import re as _re
@@ -39,7 +44,7 @@ from PyQt5.QtWidgets import (
     QAbstractItemView, QAction, QComboBox, QDialog, QDialogButtonBox,
     QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMenu, QMessageBox,
     QPushButton, QStyledItemDelegate, QTableWidget, QTableWidgetItem,
-    QToolButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout
+    QToolButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget
 )
 
 from core.units import precision_for_unit, section_precision, fmt_num
@@ -63,14 +68,30 @@ _PREVIEW_ZH = {
 
 
 def localize_print_preview(dlg):
-    """把 QPrintPreviewDialog 的工具条按钮（Zoom in / Print…）改成中文。"""
+    """把 QPrintPreviewDialog 的工具条按钮（Zoom in / Print…）改成中文。
+
+    V3.8：Qt 自带的「打印」按钮弹的是它**内部**的打印框，页码范围既拿不到，
+    也无法预填页面设置里的范围 —— 隐藏它，改由我们在预览窗底部提供
+    自己的「打印…」（走统一的页码范围解析）。
+    """
     try:
+        # 先按原始英文找到「打印」按钮并隐藏（要在改名之前找）。
+        # 注意：光调 setVisible(False) 不够 —— 窗口还没显示时隐藏的子控件，
+        # 窗口显示后又会冒出来；工具条上的按钮跟随 QAction 的可见性，
+        # 所以必须把 QAction 也隐藏掉。
+        for b in dlg.findChildren(QToolButton):
+            act = b.defaultAction()
+            if act is not None and act.text() == 'Print':
+                act.setVisible(False)
+                b.setVisible(False)
         for act in dlg.findChildren(QAction):
             zh = _PREVIEW_ZH.get(act.text())
             if zh:
                 act.setText(zh)
                 act.setToolTip(zh)
         for b in dlg.findChildren(QToolButton):
+            if b.isHidden():        # 自己被隐藏的按钮（Qt 的「打印」）不再改名
+                continue
             zh = _PREVIEW_ZH.get(b.text())
             if zh:
                 b.setText(zh)
@@ -583,12 +604,28 @@ class ReportViewerDialog(QDialog):
                           ''.join(rows_html), grand)), None
 
     def _build_print_preview(self, printer, doc, title='打印预览'):
-        """建打印预览窗：窗口与报表同尺寸、工具条按钮中文。"""
+        """建打印预览窗：窗口与报表同尺寸、工具条按钮中文、打印走我们自己的对话框。"""
         from PyQt5.QtPrintSupport import QPrintPreviewDialog
         dlg = QPrintPreviewDialog(printer, self)
         dlg.setWindowTitle(title)
-        localize_print_preview(dlg)              # 工具条按钮中文化
+        localize_print_preview(dlg)              # 工具条按钮中文化（并隐藏 Qt 的打印）
         dlg.paintRequested.connect(lambda p: doc.print_(p))
+        # 底部加我们自己的「打印…」：Qt 自带的打印按钮用的是它内部的打印框，
+        # 页码范围拿不到、也没法预填页面设置里的范围 → 统一走我们的打印流程
+        bar = QWidget()
+        bl = QHBoxLayout(bar)
+        bl.setContentsMargins(8, 4, 8, 6)
+        bl.addStretch(1)
+        btn_print = QPushButton('打印…')
+        btn_print.setToolTip('打开系统打印窗口，可在其中选择页码范围')
+        btn_print.clicked.connect(lambda: self._on_print_doc(dlg, doc, title))
+        bl.addWidget(btn_print)
+        btn_close = QPushButton('关闭')
+        btn_close.clicked.connect(dlg.close)
+        bl.addWidget(btn_close)
+        lay = dlg.layout()
+        if lay is not None:
+            lay.addWidget(bar)
         # 窗口大小与「查看报表」协调（Qt 默认只有 640×480，太小）
         w = max(self.width(), 1080)
         h = max(self.height(), 680)
@@ -599,6 +636,28 @@ class ReportViewerDialog(QDialog):
         except Exception:
             pass
         return dlg
+
+    def _on_print_doc(self, dlg, doc, title='打印'):
+        """预览窗里的「打印…」：用我们自己的打印窗口（页码范围可控）。"""
+        try:
+            printer = dlg.printer()          # 复用预览窗的打印机，分页与预览一致
+        except Exception:
+            printer = None
+        if printer is None:
+            printer = self.win.make_printer()
+        # 预览控件知道真实总页数（比估算准），用它来限制页码范围
+        total = 0
+        try:
+            from PyQt5.QtPrintSupport import QPrintPreviewWidget
+            wid = dlg.findChild(QPrintPreviewWidget)
+            if wid is not None:
+                total = int(wid.pageCount())
+        except Exception:
+            total = 0
+        try:
+            self.win.print_document(printer, doc, title, total=total)
+        except Exception as e:
+            QMessageBox.warning(self, '打印失败', str(e))
 
     def _detail_html(self):
         """不汇总时：把当前报表明细（按范围）转成 HTML，供打印预览。
