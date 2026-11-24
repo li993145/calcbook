@@ -10,14 +10,23 @@ V3.7.1 起：
 - 打开时窗口自动放大到主界面编辑区大小，不用缩在角落里眯眼看；
 - 每个单元格画浅灰虚线框，格子边界清楚；
 - 所有列（含项目名称列）都能拖动改宽度。
+
+V3.7.9 起：
+- 增加**分类汇总**：按清单编号 / 项目名称 / 计量单位 / 备注 / 图纸编号 /
+  自定义列分组，每组小计工程量与条数；
+- 分组条件支持**正则匹配**（如 ^0304 把编码 0304 开头的归一组、
+  「门窗」把名称含门窗的归一组；有分组时取分组 1 作组名）；
+- 汇总结果可「打印汇总预览…」——按页面设置的纸张分页打印。
 """
+
+import re as _re
 
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QBrush, QColor, QFont, QPen
 from PyQt5.QtWidgets import (
     QAbstractItemView, QComboBox, QDialog, QDialogButtonBox, QHBoxLayout,
-    QHeaderView, QLabel, QMenu, QPushButton, QStyledItemDelegate,
-    QTreeWidget, QTreeWidgetItem, QVBoxLayout
+    QHeaderView, QLabel, QLineEdit, QMenu, QMessageBox, QPushButton,
+    QStyledItemDelegate, QTreeWidget, QTreeWidgetItem, QVBoxLayout
 )
 
 from core.units import precision_for_unit, section_precision, fmt_num
@@ -73,6 +82,32 @@ class ReportViewerDialog(QDialog):
         self.cb_level = QComboBox()
         self.cb_level.setMinimumWidth(150)
         top.addWidget(self.cb_level)
+        top.addSpacing(10)
+        # —— V3.7.9 分类汇总 ——
+        top.addWidget(QLabel('分类汇总：'))
+        self.cb_group = QComboBox()
+        self.cb_group.addItem('不汇总', None)
+        for _k, _t in (('code', '清单编号'), ('name', '项目名称'),
+                       ('unit', '计量单位'), ('remark', '备注'),
+                       ('drawing_no', '图纸编号')):
+            self.cb_group.addItem(_t, _k)
+        self.cb_group.setMinimumWidth(100)
+        self.cb_group.currentIndexChanged.connect(self._on_scope_changed)
+        top.addWidget(self.cb_group)
+        self.ed_regex = QLineEdit()
+        self.ed_regex.setPlaceholderText('正则（可选，如 ^0304 或 门窗）')
+        self.ed_regex.setMaximumWidth(230)
+        self.ed_regex.setToolTip(
+            '分组条件支持正则匹配：取第一个匹配（若有分组则取分组 1）作组名。\n'
+            '例：^0304 → 清单编码 0304 开头的归一组；门窗 → 名称含“门窗”的归一组；\n'
+            '不匹配的行归「(未匹配)」，留空则按列值直接相同归组。')
+        self.ed_regex.textChanged.connect(self._on_scope_changed)
+        top.addWidget(self.ed_regex)
+        self.btn_print_sum = QPushButton('打印汇总预览…')
+        self.btn_print_sum.clicked.connect(self._on_print_summary)
+        self.btn_print_sum.setToolTip('把当前分类汇总的结果按页面设置的纸张'
+                                      '分页打印预览')
+        top.addWidget(self.btn_print_sum)
         top.addSpacing(10)
         self.lb_range = QLabel('')
         self.lb_range.setStyleSheet('color:#444;')
@@ -192,6 +227,169 @@ class ReportViewerDialog(QDialog):
                 return [b]
         return books
 
+    # ---------------- V3.7.9 分类汇总 ----------------
+    def _refresh_group_box(self):
+        """把自定义列也加进「分类汇总」下拉框（保留当前选择）。"""
+        keep = self.cb_group.currentData()
+        self._loading = True
+        while self.cb_group.count() > 6:      # 前 6 项固定：不汇总 + 5 个内置
+            self.cb_group.removeItem(self.cb_group.count() - 1)
+        for cd in (self.win.project.columns or []):
+            if cd.get('builtin'):
+                continue
+            self.cb_group.addItem(str(cd.get('title', '列')), str(cd.get('key')))
+        idx = self.cb_group.findData(keep)
+        if idx >= 0:
+            self.cb_group.setCurrentIndex(idx)
+        self._loading = False
+
+    def _scope_rows(self):
+        """当前范围（计算书 × 层级）内的全部数据行（跳过合计行）。"""
+        books = self._selected_books()
+        level = self.cb_level.currentData()
+        rows = []
+        if level is None or level < 0:
+            for b in books:
+                for sec in b.iter_self_and_desc():
+                    rows.extend(sec.rows)
+        else:
+            for b in books:
+                for node in self._nodes_at_depth(b, level):
+                    rows.extend(node.rows)
+        return [r for r in rows if not getattr(r, 'total_row', False)]
+
+    def _build_groups(self):
+        """按当前分类字段（+可选正则）分组，返回 ([(组名, 行列表)...], 错误)。"""
+        key = self.cb_group.currentData()
+        rx = None
+        pat = self.ed_regex.text().strip()
+        if pat:
+            try:
+                rx = _re.compile(pat)
+            except _re.error as e:
+                return None, '正则表达式无效：%s' % e
+        groups = {}
+        order = []
+        for r in self._scope_rows():
+            txt = str(_row_field(r, key) or '').strip()
+            if rx is not None:
+                m = rx.search(txt)
+                g = None
+                if m:
+                    g = m.group(1) if m.groups() else m.group(0)
+                g = (g or '(未匹配)').strip() or '(未匹配)'
+            else:
+                g = txt or '(空)'
+            if g not in groups:
+                groups[g] = []
+                order.append(g)
+            groups[g].append(r)
+        return [(g, groups[g]) for g in order], None
+
+    def _refresh_group_tree(self, prec):
+        """分类汇总模式：每组一个顶层节点（小计工程量/条数），可展开看明细。"""
+        from PyQt5.QtWidgets import QMessageBox  # noqa: F401（预留）
+        self.tree.clear()
+        groups, err = self._build_groups()
+        if err:
+            self.lb_range.setText(err)
+            self.lb_total.setText('')
+            return
+        label = self.cb_group.currentText()
+        scope = '全部计算书' if self.cb_book.currentData() is None \
+            else (self.cb_book.currentText() or '全部计算书')
+        txt = '分类汇总：按「%s」· %s' % (label, scope)
+        if self.cb_level.currentData() not in (None, -1):
+            txt += ' · %s' % (self.cb_level.currentText() or '')
+        if self.ed_regex.text().strip():
+            txt += ' · 正则：%s' % self.ed_regex.text().strip()
+        self.lb_range.setText(txt)
+        grand, grand_rows = 0.0, 0
+        for g, rows in groups:
+            vals = [r.value for r in rows
+                    if not r.no_count and r.value is not None]
+            tot = sum(vals)
+            cnt = len(vals)
+            units = [r.unit for r in rows if r.unit]
+            unit = max(set(units), key=units.count) if units else ''
+            item = QTreeWidgetItem([g, '共 %d 条' % len(rows), unit,
+                                    fmt_num(tot, prec) if cnt else '', '', '', ''])
+            f = item.font(0)
+            f.setBold(True)
+            item.setFont(0, f)
+            item.setForeground(0, QBrush(QColor('#1f5f99')))
+            item.setForeground(3, QBrush(QColor('#1f5f99')))
+            for r in rows:
+                val = '' if r.no_count else (
+                    fmt_num(r.value, precision_for_unit(r.unit, prec))
+                    if r.value is not None else '')
+                sub = QTreeWidgetItem([r.code or '', r.name or '', r.unit or '',
+                                       val, r.formula or '',
+                                       _row_field(r, 'drawing_no'), r.remark or ''])
+                for c in range(self.tree.columnCount()):
+                    sub.setForeground(c, QBrush(QColor('#333333')))
+                item.addChild(sub)
+            self.tree.addTopLevelItem(item)
+            item.setExpanded(True)
+            grand += tot
+            grand_rows += cnt
+        self.lb_total.setText('合计：%.3f    共 %d 条计算式' % (grand, grand_rows))
+
+    def _summary_html(self):
+        """把分类汇总结果转成 HTML（供打印预览）。返回 (html, 错误)。"""
+        import html as _html
+        groups, err = self._build_groups()
+        if err:
+            return None, err
+        prec = getattr(self.win, 'precision', 3)
+        rows_html = []
+        grand = 0.0
+        for g, rows in groups:
+            vals = [r.value for r in rows
+                    if not r.no_count and r.value is not None]
+            tot = sum(vals)
+            grand += tot
+            units = [r.unit for r in rows if r.unit]
+            unit = max(set(units), key=units.count) if units else ''
+            rows_html.append(
+                '<tr><td>%s</td><td align="center">%s</td>'
+                '<td align="center">%d</td><td align="right">%s</td></tr>'
+                % (_html.escape(g), _html.escape(unit), len(rows),
+                   fmt_num(tot, prec) if vals else ''))
+        label = self.cb_group.currentText()
+        pat = self.ed_regex.text().strip()
+        meta = '按「%s」分类%s' % (label,
+                                '（正则：%s）' % _html.escape(pat) if pat else '')
+        return (
+            '<h2 style="font-family:sans-serif">工程量分类汇总表</h2>'
+            '<p style="color:#444">%s ｜ 汇总范围：%s</p>'
+            '<table width="100%%" border="1" cellspacing="0" cellpadding="4" '
+            'style="border-collapse:collapse">'
+            '<tr style="background:#eef2f7"><th align="left">%s</th>'
+            '<th>单位</th><th>条数</th><th align="right">工程量合计</th></tr>'
+            '%s'
+            '<tr><th align="left">总计</th><th></th><th></th>'
+            '<th align="right">%.3f</th></tr>'
+            '</table>' % (meta, _html.escape(self.cb_book.currentText()
+                                             or '全部计算书'),
+                          label, ''.join(rows_html), grand)), None
+
+    def _on_print_summary(self):
+        """打印汇总预览：按页面设置的纸张分页预览/打印汇总表。"""
+        html, err = self._summary_html()
+        if err:
+            QMessageBox.warning(self, '打印汇总预览', err)
+            return
+        from PyQt5.QtGui import QTextDocument
+        from PyQt5.QtPrintSupport import QPrintPreviewDialog
+        printer = self.win.make_printer()
+        doc = QTextDocument()
+        doc.setHtml(html)
+        dlg = QPrintPreviewDialog(printer, self)
+        dlg.setWindowTitle('打印预览——工程量分类汇总表')
+        dlg.paintRequested.connect(lambda p: doc.print_(p))
+        dlg.exec_()
+
     # ---------------- 窗口大小 ----------------
     def _fit_to_editor(self):
         """打开时自动放大到主界面编辑区（表格）的大小，看着不费劲。"""
@@ -213,9 +411,14 @@ class ReportViewerDialog(QDialog):
         except Exception:
             pass
         self._fill_scope_boxes()
+        self._refresh_group_box()
         self.tree.clear()
         proj = win.project
         prec = getattr(win, 'precision', 3)
+        # V3.7.9：选了分类字段 → 分组汇总视图（每组小计，可展开看明细）
+        if self.cb_group.currentData():
+            self._refresh_group_tree(prec)
+            return
         books = self._selected_books()
         level = self.cb_level.currentData()
         if level is None:

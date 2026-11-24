@@ -41,7 +41,7 @@ from ui_drawing import (encode_img, decode_img, capture_region, img_size,
 APP_NAME = "工程量计算书"
 # 本表内部复制/剪切的结构化剪贴板格式（多行整行复制 → 粘到任意位置插入行，不覆盖已有数据）
 CB_ROWS_MIME = 'application/x-calcbook-rows'
-APP_VER = "3.7.7"
+APP_VER = "3.7.9"
 FILE_EXT = '.gcls'          # 工程文件后缀（内容仍是 JSON，便于排查与迁移）
 # V3.7.3：表格最大行列数与 WPS 表格一致（1048576 行 × 16384 列）
 MAX_ROWS = 1048576
@@ -818,6 +818,13 @@ class LiveSyncDelegate(QStyledItemDelegate):
             return None                 # 勾选框不需要文本编辑器
         if key == 'img':
             return None                 # V3.7.5 图纸列：双击走放大/截图，不进文本编辑
+        # V3.7.9：合计行的 名称/工程量/公式 由程序自动汇总，不允许手工编辑
+        try:
+            _r = self.win.current_section.rows[index.row()]
+            if getattr(_r, 'total_row', False) and key in ('value', 'name', 'formula'):
+                return None
+        except (IndexError, AttributeError):
+            pass
         # V3.7.3：编辑器跟随单元格对齐——序号/编号/单位/工程量等默认居中的列，
         # 双击进入输入时文字也居中显示（以前编辑器一律靠左，看着像没居中）。
         try:
@@ -3901,7 +3908,7 @@ class MainWindow(QMainWindow):
         # 导航栏（含表头）统一常规字重，不用加粗
         # V3.7.4：节点行高按名称字体实际高度收紧（以前默认行距偏大，一屏放不下几个节点）
         _fm = self.tree.fontMetrics()
-        _ih = max(20, _fm.height() + 6)
+        _ih = max(18, _fm.height() + 2)
         self.tree.setStyleSheet('QHeaderView::section { font-weight: 400; }'
                                 'QTreeWidget::item { height: %dpx; }' % _ih)
         self.tree.setContextMenuPolicy(Qt.CustomContextMenu)
@@ -4529,7 +4536,7 @@ class MainWindow(QMainWindow):
         <li><b>单位与小数位</b>：单位列是下拉框（可滚动选择，也可直接输入自定义单位），内置 m、m2、m3、kg、t、个、块、套、处、台、组、根、樘、座、件、项、台班、延长米、千块等。工程量小数位按单位自动决定：m / m2 / m3 / kg 保留 2 位，t 保留 3 位，个 / 块 / 套 / 处 / 台 / 组 取整，其他单位默认 3 位；表格、打印、Excel 导出口径一致。</li>
         <li><b>复制 / 剪切 / 粘贴</b>：单击选中即可 Ctrl+C 复制（不必进编辑态），双击 / F2 才编辑。框选区域 Ctrl+C 复制为 TSV，可直接粘到 WPS / Excel；<b>复制 / 粘贴按表头当前显示顺序读写，拖动列换位后也不会错列</b>。整行（可多选）复制 / 剪切后，Ctrl+V 粘到任意位置会<b>插入行、原有数据顺延，不覆盖</b>；只框选部分单元格再剪切时，<b>仅清空这些单元格，不删除整行</b>；右键「粘贴」同时支持 WPS 表格、外部文件文本和本表复制 / 剪切的数据（含字体、颜色、对齐）；所有操作可 Ctrl+Z 撤销。在最后一行按<b>回车</b>自动追加新行；粘贴超出末尾也会自动加行。</li>
         <li><b>清除内容 / 删除</b>：选中单元格（可多选）后按 <b>Delete</b> 或右键「清除单元格内容」，只清空内容、保留行列结构，可撤销；整行 / 整列选中时按 Delete 才删除整行 / 整列，结构删除也保留在专门的右键菜单里。</li>
-        <li><b>右键菜单</b>：单元格右键可插入行、<b>在此行打断分部</b>、清除内容、设置 / 清除打印区域、调整列宽行高、标记为不计、单元格对齐 / 字体 / 转半角；行号右键可插入 / 删除行、<b>打断分部</b>、整行上色、本行对齐、冻结至本行；表头右键可添加 / 删除 / 重命名列、整列着色、整列对齐、冻结至本列；左上角角标右键可复制 / 粘贴 / 清除内容、删除全部数据、行列宽高开关、全表对齐、全选、取消冻结。</li>
+        <li><b>右键菜单</b>：单元格右键可插入行、<b>插入合计行（V3.7.9）</b>、<b>在此行打断分部</b>、清除内容、设置 / 清除打印区域、调整列宽行高、标记为不计、单元格对齐 / 字体 / 转半角；行号右键可插入 / 删除行、<b>插入合计行（V3.7.9）</b>、<b>打断分部</b>、整行上色、本行对齐、冻结至本行；表头右键可添加 / 删除 / 重命名列（<b>V3.7.9 普通分部里改名可选「仅本分部」或「整个项目」</b>——明细表可以单独给列起名）、整列着色、整列对齐、冻结至本列；左上角角标右键可复制 / 粘贴 / 清除内容、删除全部数据、行列宽高开关、全表对齐、全选、取消冻结。</li>
         <li><b>填充颜色</b>：选中单元格或整行 / 整列后，点「格式」组「填充颜色」，选颜色和应用范围（整行 / 整列 / 仅选中单元格）。优先级为 单元格 &gt; 整行 &gt; 整列；「清除填充」按当前选择自动判断范围。颜色会带到打印、预览和 Excel。</li>
         <li><b>列宽 / 行高</b>：<b>默认自适应</b>——列宽按内容计算并铺满窗口，行高按内容撑高（长公式 / 长备注自动换行），无需手点。手动拖过列宽后自动列宽会关闭，可在左上角角标右键重新勾选「自动列宽 / 自动行高」恢复；把鼠标移到两列（或两行）表头之间的分隔线上<b>双击</b>可只自适应该列 / 该行。</li>
         <li><b>冻结窗格</b>：右键行号「冻结至本行」/ 列头「冻结至本列」，可同时冻结行列；<b>滚动时冻结线以上 / 以左的部分始终固定显示，以下 / 以右的部分随鼠标滚动</b>（V3.7.4 修复：以前编辑过单元格后冻结区会消失不再显示）；冻结区右键也能弹出单元格菜单，双击冻结区单元格仍可编辑；左上角右键「取消全部冻结」。设置随工程保存。</li>
@@ -4537,7 +4544,7 @@ class MainWindow(QMainWindow):
         <li><b>拖动填充柄（自动序号，V3.7.1 修正）</b>：选中单元格后右下角有蓝色小方块，按住向下 / 向右拖动即自动填充序号（纯数字等差递增、尾号数字自动进位、汉字 / 公式循环复制）。拖动时的<b>虚线框正好罩住要填充的区域</b>（以前会宽出一格，看着像拉到旁边的单元格），目标区还铺了一层淡蓝底色，一眼能看出要填到哪里。</li>
         <li><b>排序 / 筛选</b>：右键或工具栏「计算书编辑」可排序、筛选——先在窗口里选<b>筛选列</b>（选哪列就筛哪列，V3.5 修复）再选条件（等于 / 包含 / 数字比较 / 正则 / 按填充颜色等），只隐藏不删数据、刷新后保持、编辑数据后立即重算；比较时自动统一全 / 半角与空格（V3.6），例如 <code>Ａ－００１</code> 可用 <code>A-001</code> 筛到；内容留空或正则写错会明确提示。<b>取消筛选</b>有三个入口：筛选窗口内点「清除筛选」、工具栏「清除筛选」、右键「清除筛选」，点后立即恢复显示全部行。</li>
         <li><b>选区统计与缩放</b>：单选 / 多选「工程量」列的数据，状态栏右下角实时显示 <code>求和=… 平均值=… 计数=…</code>（WPS 式，取代原来的固定小计）；多选 / 全选后普通左键点某格会恢复为只选这一格（V3.6），统计只算真正选中的格子。在表格上按住 <b>Ctrl + 鼠标滚轮</b> 可放大 / 缩小单元格显示（字号与手动行高列宽同比例，6–24 号字），不按 Ctrl 时滚轮照常滚动。</li>
-        <li><b>默认列与列宽（V3.6；V3.7.5 新增图纸列）</b>：默认列顺序为 序号 / 编号 / 项目名称 / 单位 / 工程量 / 计算公式 / <b>图纸（V3.7.5）</b> / 图纸编号 / 大样图来源 / 不计 / 备注。列宽默认固定，新增列或刷新表格不会打乱已调好的宽度；表头右键可增删 / 重命名列、设置列宽（工具栏「数据列定义」按钮已取消）。<b>序号 / 编号 / 单位 / 工程量以及新增列默认居中对齐</b>，仍可右键单独改对齐；老工程打开时「图纸」列自动补到计算公式后面，原数据不丢。</li>
+        <li><b>默认列与列宽（V3.6；V3.7.9 调整为 9 列）</b>：默认列顺序为 序号 / 清单编号 / 项目名称 / 计量单位 / 工程量 / 计算公式 / 备注 / <b>图纸</b> / 不计（V3.7.9 起「图纸编号」列从默认列取消——老工程打开时自动迁移一次，<code>图纸编号</code> 数据不丢，需要时表头右键可自己加回）。列宽默认固定，新增列或刷新表格不会打乱已调好的宽度；表头右键可增删 / 重命名列、设置列宽。<b>序号 / 清单编号 / 计量单位 / 工程量以及新增列默认居中对齐</b>，仍可右键单独改对齐；老工程打开时列序自动迁移一次（之后自己拖动的列序不会被覆盖）。</li>
         <li><b>图纸留底（V3.7.5）</b>：右键「图纸」列 →「图纸（当前行）」可截图 / 选图 / 粘贴图片 / 放大 / 另存 / 清除；Ribbon 有<b>「图纸」组</b>（图纸截图 / 图纸预览开关，「选择图纸」按钮 V3.7.6 起取消，改在单元格右键「图纸」子菜单里）。双击图纸格：有图放大、无图直接进入截图。截图时主窗口自动最小化、选完自动恢复。图纸数据存进工程文件，换电脑打开也在。</li>
         </ul>
 
@@ -4550,6 +4557,7 @@ class MainWindow(QMainWindow):
         <li><b>台体快捷公式（V3.7.3）</b>：「插入函数」面板新增<b>台体公式</b>分组——四棱台 frustum4(下底长,下底宽,上底长,上底宽,高)、三棱台 frustum3(下三边,上三边,高)、圆台 frustum_c(下口半径,上口半径,高)、空心圆台 frustum_ring(外下,外上,内下,内上,高)。插入的模板自带 <code>[中文说明]</code> 注释（不参与计算），按位替换示例数字即可，参数含义一眼可见。</li>
         <li><b>括号快捷键</b>：F4 公式前插入 <code>()</code>、F5 插入点插入 <code>()</code>、F6 插入点插入 <code>[]</code>、F7 末尾追加 <code>[]</code>；在单元格里直接打字时也生效。</li>
         <li><b>特殊写法</b>：度分秒如 34°56′30″ 可直接计算；<code>√9=3</code>、<code>√(3+4)</code>、<code>2×√9</code> 均可；写在公式开头的钢筋规格（如 <code>Φ8@200 4×5</code>=20）不参与计算，旧写法 Φ² / Φ³ / Φ⁴ 仍兼容。<b>钢筋等级符号</b>请点「特殊符号」：面板里用 <b>TssdEng（探索者）字体的国标制图符号</b>（一级 HPB300 / 二级 HRB335 / 三级 HRB400 / 四级 HRB500），点击即插入公式；这些符号需 TssdEng 字体显示（软件已随包附带），本机没有该字体时该组会自动隐藏。</li>
+        <li><b>单元格引用与合计行（V3.7.9）</b>：公式里可以用 <code>A行号</code> 引用<b>本分部</b>内其他行的工程量——如 <code>A12*0.35</code>（第 12 行工程量×0.35）、<code>SUM(A1:A10)</code>（第 1～10 行求和）；引用上下的行都能算对。右键菜单<b>「插入合计行」</b>在本分部末尾加一行合计，工程量自动汇总自上一个合计行以来的普通行（合计行加粗、不可手改、不参与上级汇总和报表分类汇总，不会重复计数）。引用只在本分部内有效；删行改行后重算会自动更新。</li>
         <li><b>汇总与配色</b>：每个分部自动「小计」（XJ 子分部汇总函数已取消，旧工程中的 XJ() 公式仍可正常计算）。公式列与辅助框用同一套配色：数字红、运算符黑、<code>[备注]</code>深绿、汉字淡绿、@常量紫、上标蓝，便于核对。</li>
         </ul>
 
@@ -4559,7 +4567,7 @@ class MainWindow(QMainWindow):
         <li><b>长计算式不再被切一半（V3.7.1）</b>：计算式很长、在单元格里换行后高过整页时，打印会自动把<b>该行字号缩小</b>，保证<b>整行完整印在一页里</b>（以前是从页中间断开，看不全后半截）。缩过字号的行数会在打印完成后的状态栏提示。</li>
         <li><b>页面设置</b>：可设表头标题、页眉、<b>页脚左 / 中 / 右三栏</b>（一般放编制人、复核人、日期等签字信息）、上 / 下 / 左 / 右页边距、纸张方向、纸张大小（下拉列出系统打印机支持的纸型，选“自定义”可填宽高 mm）、水平 / 垂直对齐。打印和预览每页底部自动显示「第 X 页，共 Y 页」，无需手动填页码。</li>
         <li><b>打印区域</b>：在表格里框选单元格后<b>右键 →「设置打印区域」</b>，报表只输出选中的行列，小计也只算选中行；右键「清除打印区域」恢复打印整张计算书。快捷操作行的「打印选中区域」也可直接使用。</li>
-        <li><b>查看报表（V3.7.0）</b>：点「数据导出」页签或 Ribbon 的<b>「查看报表」</b>，弹出<b>表格化的工程量报表</b>：左边是计算书 / 单位 / 分部 / 分项的层级树，右边是编号、项目名称、单位、工程量、计算公式、图纸编号、备注，每个节点后面带合计，整体还有总计。<b>先在这里核对数据，确认没问题再打印或导出</b>，不用一进来就跳到打印预览。窗口底部可直接「刷新 / 打印 / 导出表格 / 页面设置」。</li>
+        <li><b>查看报表（V3.7.0；V3.7.9 增加分类汇总）</b>：点「数据导出」页签或 Ribbon 的<b>「查看报表」</b>，弹出<b>表格化的工程量报表</b>：左边是计算书 / 单位 / 分部 / 分项的层级树，右边是编号、项目名称、单位、工程量、计算公式、图纸编号、备注，每个节点后面带合计，整体还有总计。<b>先在这里核对数据，确认没问题再打印或导出</b>，不用一进来就跳到打印预览。窗口底部可直接「刷新 / 打印 / 导出表格 / 页面设置」。<b>分类汇总（V3.7.9）</b>：顶部选「按清单编号 / 项目名称 / 计量单位 / 备注 / 图纸编号 / 自定义列」分组，每组小计工程量与条数、可展开看明细；<b>分组条件支持正则匹配</b>（如 <code>^0304</code> 把编码 0304 开头的归一组、「门窗」把名称含门窗的归一组，不匹配的归「(未匹配)」）；点<b>「打印汇总预览…」</b>把汇总表按页面设置的纸张分页打印预览。</li>
         <li><b>报表范围可选（V3.7.1）</b>：查看报表窗口顶部多了两个下拉——<b>「计算书」</b>选看哪一本（全部计算书 / 指定计算书），<b>「层级」</b>选看哪一层（全部层级 / 只看「单位工程」层 / 只看「分部工程」层…）。选某一层时按层汇总，每个节点列出「本级 N 条 / 含下级 M 条」和工程量合计，一眼看清各层汇总。窗口<b>打开时自动放大到编辑区大小</b>，不用缩在角落里看；<b>所有列（含项目名称列）都能拖动改宽度</b>，每个单元格加了<b>浅灰虚线框</b>，行列边界清楚不费劲。</li>
         <li><b>导出</b>：Ribbon「导出表格」生成 .xlsx（WPS / Excel 都能打开），包含各计算书与常量表；页面设置中的页脚三栏和自动页码也会写入导出文件。</li>
         </ul>
@@ -4716,7 +4724,8 @@ class MainWindow(QMainWindow):
         sec = self.current_section
         cols = self.project.columns
         self.table.setColumnCount(len(cols))
-        self.table.setHorizontalHeaderLabels([c['title'] for c in cols])
+        # V3.7.9：表头显示「分部级列名覆盖」——明细表可单独给列起名
+        self.table.setHorizontalHeaderLabels([self._col_display_title(c) for c in cols])
         for j, cd in enumerate(cols):
             hi = self.table.horizontalHeaderItem(j)
             if hi is not None and cd['key'] == 'unit':
@@ -4758,6 +4767,11 @@ class MainWindow(QMainWindow):
                             it.setToolTip(row.error)
                         self._apply_item_font(it, row, key)
                         self._apply_item_align(it, row, key)
+                        # V3.7.9：合计行 名称/工程量 加粗显示
+                        if getattr(row, 'total_row', False) and key in ('name', 'value'):
+                            f = it.font()
+                            f.setBold(True)
+                            it.setFont(f)
                         # V3.7.0：注释颜色（选项配置 → 注释设置）作用到备注列
                         if key == 'remark':
                             it.setForeground(QColor(self.opt('note_color', '#008000')))
@@ -5772,6 +5786,7 @@ class MainWindow(QMainWindow):
         new = Section(sec.name, parent)
         new.expanded = getattr(sec, 'expanded', True)
         new.link = getattr(sec, 'link', '')          # V3.7.6 链接一起复制
+        new.col_titles = dict(getattr(sec, 'col_titles', {}) or {})  # V3.7.9 列名覆盖
         new.rows = []
         for r in getattr(sec, 'rows', []) or []:
             nr = Row.from_dict(r.to_dict())
@@ -6168,6 +6183,7 @@ class MainWindow(QMainWindow):
         # V3.7.6：注释标签入口移到单元格右键（原工具栏按钮取消）
         menu.addAction('注释标签（插入备注标记）', self.insert_annotation_label)
         menu.addAction('标记为不计', self.toggle_no_count)
+        menu.addAction('插入合计行（自动汇总本分部）', self.insert_total_row)
         menu.addSeparator()
         menu.addAction('设置打印区域（仅打印选中部分）', self.set_print_area)
         menu.addAction('清除打印区域（恢复打印全部）', self.clear_print_area)
@@ -6185,6 +6201,7 @@ class MainWindow(QMainWindow):
         menu.addAction('在上方插入行', self.insert_row_above)
         menu.addAction('在下方插入行', self.insert_row_below)
         menu.addAction('在末尾追加行', self.append_rows_at_end)
+        menu.addAction('插入合计行（自动汇总本分部）', self.insert_total_row)
         menu.addAction('在此行打断分部（本行起归新分部）', self.split_section_at_row)
         menu.addSeparator()
         menu.addAction('删除本行', self.delete_rows)
@@ -6789,14 +6806,56 @@ class MainWindow(QMainWindow):
         self._dirty = True
         self.status.showMessage('已添加 %d 列' % n if n > 1 else '已添加列「%s」' % name, 3000)
 
+    def _col_display_title(self, cd):
+        """列的显示标题：当前分部有覆盖名就用覆盖名，否则用项目级标题。"""
+        ov = getattr(getattr(self, 'current_section', None), 'col_titles', None)
+        if ov:
+            return ov.get(cd['key']) or cd['title']
+        return cd['title']
+
     def rename_column(self, col):
         cd = self.project.columns[col]
-        name, ok = QInputDialog.getText(self, '重命名列', '列名称：', QLineEdit.Normal, cd['title'])
-        if ok and name.strip():
-            self.push_undo('重命名列')
-            cd['title'] = name.strip()
-            self.refresh_table()
-            self._dirty = True
+        name, ok = QInputDialog.getText(self, '重命名列', '列名称：', QLineEdit.Normal,
+                                        self._col_display_title(cd))
+        if not (ok and name.strip()):
+            return
+        name = name.strip()
+        sec = getattr(self, 'current_section', None)
+        is_book = sec is not None and sec in (self.project.books or [])
+        scope = 'all'
+        if sec is not None and not is_book:
+            # V3.7.9：普通分部里改名时问一次范围——明细表可以单独设置列名
+            box = QMessageBox(QMessageBox.Question, '重命名列',
+                              '列「%s」改名为「%s」，应用到哪个范围？'
+                              % (cd['title'], name), parent=self)
+            b_sec = box.addButton('仅本分部「%s」' % sec.name, QMessageBox.AcceptRole)
+            b_all = box.addButton('整个项目', QMessageBox.ActionRole)
+            b_cancel = box.addButton('取消', QMessageBox.RejectRole)
+            box.exec_()
+            picked = box.clickedButton()
+            if picked not in (b_sec, b_all):
+                return
+            scope = 'sec' if picked is b_sec else 'all'
+        elif sec is not None:
+            box = QMessageBox(QMessageBox.Question, '重命名列',
+                              '列「%s」改名为「%s」？将应用到整个项目。'
+                              % (cd['title'], name), parent=self)
+            b_all = box.addButton('整个项目', QMessageBox.AcceptRole)
+            box.addButton('取消', QMessageBox.RejectRole)
+            box.exec_()
+            if box.clickedButton() is not b_all:
+                return
+        self.push_undo('重命名列')
+        if scope == 'sec':
+            if not hasattr(sec, 'col_titles'):
+                sec.col_titles = {}
+            sec.col_titles[cd['key']] = name
+            self.status.showMessage('已只把本分部的列改名为「%s」'
+                                    '（其他分部与项目级列名不变）' % name, 4000)
+        else:
+            cd['title'] = name
+        self.refresh_table()
+        self._dirty = True
 
     def delete_column(self, col):
         cd = self.project.columns[col]
@@ -6811,6 +6870,22 @@ class MainWindow(QMainWindow):
         self.project.columns.pop(col)
         self.refresh_table()
         self._dirty = True
+
+    def insert_total_row(self, *args):
+        """V3.7.9：在本分部末尾插入合计行——工程量自动汇总自上一个
+        合计行（或分部开头）以来的普通行；合计行不参与上级 XJ() 与
+        报表分类汇总，避免重复计数。"""
+        sec = self.current_section
+        self.push_undo('插入合计行')
+        r = Row()
+        r.total_row = True
+        r.name = '合计'
+        sec.rows.append(r)
+        self.project.recalc()
+        self.refresh_table()
+        self._dirty = True
+        self.status.showMessage('已在「%s」末尾插入合计行（工程量自动汇总，'
+                                '可用 Ctrl+Z 撤销）' % sec.name, 4000)
 
     def toggle_no_count(self):
         sel = self.table.selectionModel().selectedRows()

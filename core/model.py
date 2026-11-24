@@ -16,21 +16,18 @@ DEFAULT_LEVELS = ['单项工程', '单位工程', '分部工程', '分项工程'
 
 
 # 默认列定义：每列 {key, title, width, builtin}
-# V3.6.0：按用户要求重排默认列并固定默认宽度（序号/编号/项目名称/单位/工程量/
-# 计算公式/图纸编号/大样图来源/不计/备注）。新增列时这些宽度不得被重置。
+# V3.6.0：按用户要求重排默认列并固定默认宽度。新增列时这些宽度不得被重置。
+# V3.7.9：默认列 9 列——序号/清单编号/项目名称/计量单位/工程量/计算公式/备注/图纸/不计
+# （图纸编号列从默认列取消；老工程打开时一次性迁移，数据不丢，需要时可自己加回列）
 DEFAULT_COLUMNS = [
     {'key': 'seq', 'title': '序号', 'width': 80, 'builtin': True},
-    # V3.7.7：编号→清单编号、单位→计量单位；顺序调整为
-    # 序号/清单编号/项目名称/计量单位/计算公式/工程量/图纸编号/图纸/备注/不计
-    # （大样图来源列取消；工程量是计算结果列，放在计算公式后面）
     {'key': 'code', 'title': '清单编号', 'width': 135, 'builtin': True},
     {'key': 'name', 'title': '项目名称', 'width': 340, 'builtin': True},
     {'key': 'unit', 'title': '计量单位', 'width': 80, 'builtin': True},
-    {'key': 'formula', 'title': '计算公式', 'width': 600, 'builtin': True},
     {'key': 'value', 'title': '工程量', 'width': 100, 'builtin': True},
-    {'key': 'drawing_no', 'title': '图纸编号', 'width': 150, 'builtin': True},
-    {'key': 'img', 'title': '图纸', 'width': 110, 'builtin': True},
+    {'key': 'formula', 'title': '计算公式', 'width': 600, 'builtin': True},
     {'key': 'remark', 'title': '备注', 'width': 200, 'builtin': True},
+    {'key': 'img', 'title': '图纸', 'width': 110, 'builtin': True},
     {'key': 'no_count', 'title': '不计', 'width': 80, 'builtin': True},
 ]
 
@@ -135,6 +132,39 @@ def apply_column_order_v377(cols):
     return result
 
 
+# V3.7.9 新默认列顺序（apply_column_order_v379 用）；图纸编号列取消
+_V379_ORDER = [c['key'] for c in DEFAULT_COLUMNS]
+
+
+def apply_column_order_v379(cols):
+    """V3.7.9：老工程一次性按 9 列新顺序重排，并去掉「图纸编号」列。
+
+    * 只动顺序，**每列自己的宽度/名称等设置原样保留**；
+    * 图纸编号列从表中取消（Row.drawing_no 数据仍存在，需要时可在
+      表头右键「添加列」后重新显示——自定义列数据不丢）；
+    * 用户自建的自定义列排在内置列后面，相对顺序不变。
+    """
+    if not cols:
+        return [dict(c) for c in DEFAULT_COLUMNS]
+    by_key = {}
+    rest = []
+    for c in cols:
+        k = str(c.get('key', ''))
+        if k in _V379_ORDER and k not in by_key:
+            by_key[k] = dict(c)
+        else:
+            rest.append(dict(c))          # 自定义列（drawing_no 在 rest 里剔除）
+    result = []
+    for k in _V379_ORDER:
+        c = by_key.pop(k, None)
+        if c is None:
+            c = next((dict(d) for d in DEFAULT_COLUMNS if d['key'] == k), None)
+        if c is not None:
+            result.append(c)
+    result.extend(c for c in rest if str(c.get('key', '')) != 'drawing_no')
+    return result
+
+
 class Row:
     """一行计算式。"""
     def __init__(self, code="", name="", part="", formula="", unit="",
@@ -157,6 +187,9 @@ class Row:
         self.error = None
         self.cleaned = ""
         self.img = None            # V3.7.5 图纸：{'data':b64,'fmt','thumb':b64,'path','t'} 或 None
+        # V3.7.9 合计行：工程量=自动汇总自上一个合计行以来的本分部普通行，
+        # 不参与上级 XJ() 汇总与分类汇总（避免重复计数）
+        self.total_row = False
 
     def to_dict(self):
         d = dict(id=self.id, code=self.code, name=self.name, part=self.part,
@@ -169,6 +202,8 @@ class Row:
         d['cell_align'] = self.cell_align
         if self.img:
             d['img'] = self.img
+        if getattr(self, 'total_row', False):
+            d['total_row'] = True
         return d
 
     @classmethod
@@ -191,6 +226,9 @@ class Section:
         self.expanded = True
         # V3.7.6：节点外链（网址或文件路径），明细子目等节点可挂链接
         self.link = ''
+        # V3.7.9：分部级列名覆盖 {列key: 标题}——同一个项目里，
+        # 明细表可以单独把某列叫别的名字（空 dict = 跟随项目级列名）
+        self.col_titles = {}
 
     def add_child(self, name="新建分部"):
         c = Section(name, self)
@@ -210,6 +248,9 @@ class Section:
                  rows=[r.to_dict() for r in self.rows])
         if getattr(self, 'link', ''):        # 有链接才写盘，老文件零改动
             d['link'] = self.link
+        ct = getattr(self, 'col_titles', None)
+        if ct:                                # 有覆盖才写盘，老文件零改动
+            d['col_titles'] = dict(ct)
         return d
 
     @classmethod
@@ -218,6 +259,8 @@ class Section:
         s.id = d.get('id', new_id())
         s.expanded = d.get('expanded', True)
         s.link = d.get('link', '')
+        ct = d.get('col_titles')
+        s.col_titles = dict(ct) if isinstance(ct, dict) else {}
         s.rows = [Row.from_dict(x) for x in d.get('rows', [])]
         s.children = [cls.from_dict(x, s) for x in d.get('children', [])]
         return s
@@ -323,26 +366,65 @@ class Project:
         return result
 
     def recalc(self):
-        """重算所有行；XJ 汇总子节点有效工程量。"""
+        """重算所有行；XJ 汇总子节点有效工程量。
+
+        V3.7.9：分部内支持单元格引用——公式里 A<行号> 表示本分部第 <行号> 行
+        的工程量（如 A12*0.35、SUM(A1:A10)）。求值分两遍：
+        第一遍引用未算出的行按 0 处理，第二遍用第一遍结果重算一遍，
+        这样引用上下行都能得到正确结果（隔行链式引用以第二遍为准）。
+        合计行（Row.total_row）不进公式引擎，直接汇总本分部内
+        自上一个合计行以来的普通行。
+        """
         self.engine.set_constants(self.constants)
         # 后序遍历：先子节点后父节点，保证 XJ 能取到子分部结果
         def walk(sec):
             for c in sec.children:
                 walk(c)
-            for row in sec.rows:
-                if row.no_count:
-                    row.value, row.cleaned, row.error = None, row.formula, None
-                    continue
-                def xj(args):
-                    # XJ() 汇总当前分部下所有后代分部的工程量
-                    total = 0.0
-                    for c in sec.children:
-                        for descendant in c.iter_self_and_desc():
-                            if descendant.total() is not None:
-                                total += descendant.total()
-                    return total
-                row.value, row.cleaned, row.error = self.engine.evaluate(
-                    row.formula, xj_callback=xj)
+            rows = sec.rows
+            n = len(rows)
+            base = {}                       # 第一遍结果：{'A1': 值, ...}
+            for pass_i in (0, 1):
+                # 单元格引用初值：第一遍全 0，第二遍用第一遍结果
+                ctx = dict(base) if pass_i else {}
+                for i in range(1, n + 1):
+                    ctx.setdefault('A%d' % i, 0.0)
+                for idx, row in enumerate(rows):
+                    key = 'A%d' % (idx + 1)
+                    def xj(args):
+                        # XJ() 汇总当前分部下所有后代分部的工程量
+                        total = 0.0
+                        for c in sec.children:
+                            for descendant in c.iter_self_and_desc():
+                                if descendant.total() is not None:
+                                    total += descendant.total()
+                        return total
+                    if getattr(row, 'total_row', False):
+                        # 合计行：汇总自上一个合计行以来的普通行（跳过不计行）
+                        start = 0
+                        for j in range(idx - 1, -1, -1):
+                            if getattr(rows[j], 'total_row', False):
+                                start = j + 1
+                                break
+                        tot = sum(rows[j].value for j in range(start, idx)
+                                  if not rows[j].no_count
+                                  and rows[j].value is not None
+                                  and not getattr(rows[j], 'total_row', False))
+                        row.value, row.cleaned, row.error = tot, '合计', None
+                        ctx[key] = tot
+                        if not pass_i:
+                            base[key] = tot
+                        continue
+                    if row.no_count:
+                        row.value, row.cleaned, row.error = None, row.formula, None
+                        ctx[key] = 0.0
+                        continue
+                    ctx[key] = 0.0              # 自己引用自己按 0
+                    row.value, row.cleaned, row.error = self.engine.evaluate(
+                        row.formula, context=ctx, xj_callback=xj)
+                    v = row.value if row.value is not None else 0.0
+                    ctx[key] = v
+                    if not pass_i:
+                        base[key] = row.value
         for book in self.books:
             walk(book)
 
@@ -355,6 +437,7 @@ class Project:
                     freeze_rows=getattr(self, 'freeze_rows', 0),
                     freeze_cols=getattr(self, 'freeze_cols', 0),
                     col_order_v377=getattr(self, 'col_order_v377', False),
+                    col_order_v379=getattr(self, 'col_order_v379', False),
                     books=[b.to_dict() for b in self.books],
                     root=self.books[0].to_dict() if self.books else None, version=4)
 
@@ -383,6 +466,11 @@ class Project:
         if not p.col_order_v377:
             p.columns = apply_column_order_v377(p.columns)
             p.col_order_v377 = True
+        # V3.7.9：一次性按 9 列新顺序重排并去掉「图纸编号」列，之后不再动
+        p.col_order_v379 = bool(d.get('col_order_v379', False))
+        if not p.col_order_v379:
+            p.columns = apply_column_order_v379(p.columns)
+            p.col_order_v379 = True
         # 冻结窗格（V3.2）：旧工程无此字段默认不冻结
         try:
             p.freeze_rows = max(0, int(d.get('freeze_rows') or 0))
@@ -422,10 +510,12 @@ class Project:
 
 # Section.total 在下面定义（避免类体内引用未定义）
 def _section_total(self):
-    """本部所有有效行工程量之和。"""
+    """本部所有有效行工程量之和（合计行是汇总展示，不重复计入）。"""
     total = 0.0
     any_valid = False
     for r in self.rows:
+        if getattr(r, 'total_row', False):
+            continue
         if not r.no_count and r.value is not None:
             total += r.value
             any_valid = True

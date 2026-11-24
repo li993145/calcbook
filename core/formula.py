@@ -321,6 +321,19 @@ class FormulaEngine:
         """返回清理后可直接求值的表达式（用于展示与调试）。"""
         self._missing = []      # 公式里引用、但常量表里没有的名字
         s = to_halfwidth(str(expr))
+        # V3.7.9：单元格引用。SUM(A1:A10) 先展开成 A1+A2+…+A10；
+        # A12 这类引用换成 \x01行号\x01 占位符（不含字母数字相邻，
+        # 不会被后面的钢筋规格剥离、隐式乘号规则破坏），最后再还原成 A行号。
+        # 求值时 A行号 由 context 提供（见 Project.recalc，两遍求值）。
+        def _expand_sum(m):
+            a, b = int(m.group(1)), int(m.group(2))
+            if a > b:
+                a, b = b, a
+            b = min(b, a + 1999)
+            return '(' + '+'.join('A%d' % i for i in range(a, b + 1)) + ')'
+        s = re.sub(r'(?i)\bSUM\s*\(\s*[Aa](\d+)\s*:\s*[Aa](\d+)\s*\)',
+                   _expand_sum, s)
+        s = re.sub(r'\b[Aa](\d{1,7})\b', lambda m: '\x01%s\x01' % m.group(1), s)
         # V3.6.1：TssdEng 字体的标准钢筋等级符号（私用区 U+E000 等）统一按 Φ 处理，
         # 这样「<三级钢符号>8@200 4×5」这类规格说明照常被剥离，不参与计算。
         s = re.sub('[\ue000-\ue00e\ue530-\ue53d]', 'Φ', s)
@@ -391,6 +404,8 @@ class FormulaEngine:
         s = re.sub(r'(\d)(?=[A-Za-z_])', r'\1*', s)
         s = re.sub(r'\)(?=[A-Za-z_])', r')*', s)
         s = re.sub(r'\s+', '', s)
+        # 还原单元格引用占位符 → A行号（Evaluator 从 context 里取值）
+        s = re.sub(r'\x01(\d+)\x01', lambda m: 'A' + m.group(1), s)
         return s
 
     def evaluate(self, expr, context=None, xj_callback=None):
