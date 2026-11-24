@@ -39,8 +39,11 @@ from ui_report import ReportViewerDialog
 APP_NAME = "工程量计算书"
 # 本表内部复制/剪切的结构化剪贴板格式（多行整行复制 → 粘到任意位置插入行，不覆盖已有数据）
 CB_ROWS_MIME = 'application/x-calcbook-rows'
-APP_VER = "3.7.2"
+APP_VER = "3.7.3"
 FILE_EXT = '.gcls'          # 工程文件后缀（内容仍是 JSON，便于排查与迁移）
+# V3.7.3：表格最大行列数与 WPS 表格一致（1048576 行 × 16384 列）
+MAX_ROWS = 1048576
+MAX_COLS = 16384
 # V3.6.1：备份默认放到固定目录，不再跟随工程文件所在目录；启动时自动创建。
 DEFAULT_BACKUP_DIR = r'D:\手算工程量计算书\bak'
 
@@ -797,6 +800,12 @@ class LiveSyncDelegate(QStyledItemDelegate):
         key = self.win.col_key(index.column())
         if key == 'no_count':
             return None                 # 勾选框不需要文本编辑器
+        # V3.7.3：编辑器跟随单元格对齐——序号/编号/单位/工程量等默认居中的列，
+        # 双击进入输入时文字也居中显示（以前编辑器一律靠左，看着像没居中）。
+        try:
+            al = index.data(Qt.TextAlignmentRole)
+        except Exception:
+            al = None
         if key == 'unit':
             cb = QComboBox(parent)
             cb.setEditable(True)
@@ -806,6 +815,8 @@ class LiveSyncDelegate(QStyledItemDelegate):
             cb.view().setMinimumWidth(130)
             cb.setToolTip('选择常用单位，或直接输入自定义单位\n'
                           'm/m2/m3/kg 保留2位、t 保留3位、个/块/套/处/台/组 取整')
+            if isinstance(al, int) and al and cb.lineEdit() is not None:
+                cb.lineEdit().setAlignment(Qt.Alignment(al))
             # activated 在 popup 的鼠标按下处理过程中发出：若此时同步 closeEditor
             # 销毁弹窗，Qt 后续对 popup 的处理会落空，表现为“选项点不中”。
             # 延时到事件循环尾部再提交/关闭，popup 先正常收完这一次点击。
@@ -817,12 +828,15 @@ class LiveSyncDelegate(QStyledItemDelegate):
                 st['done'] = True
                 try:
                     self._commit(ed)
-                except RuntimeError:
-                    pass    # 编辑器可能已被 QTableWidget 正常关闭
+                except (RuntimeError, TypeError):
+                    pass    # 编辑器可能已被 QTableWidget 正常关闭销毁
+                    # （销毁后的 QComboBox 再 emit commitData 会抛 TypeError）
 
             cb.activated[int].connect(lambda _i: QTimer.singleShot(0, _delayed_commit))
             return cb
         editor = super().createEditor(parent, option, index)
+        if isinstance(editor, QLineEdit) and isinstance(al, int) and al:
+            editor.setAlignment(Qt.Alignment(al))
         if isinstance(editor, QLineEdit) and key == 'formula':
             self.win._cell_editor = editor
             editor.textChanged.connect(self.win.on_cell_editor_text)
@@ -2449,6 +2463,21 @@ FUNCTION_GROUPS = [
     ]),
     ('常量', [
         ('π', '圆周率', 'π', 0, 'π = 3.14159'),
+    ]),
+    # V3.7.3：台体快捷公式——插入自带[中文说明]注释的模板，按位替换示例数字即可
+    ('台体公式', [
+        ('frustum4', '四棱台',
+         'frustum4(4.8[下底长A],3.6[下底宽B],2.4[上底长a],1.8[上底宽b],1.2[高h])', 0,
+         'V=h/6×[AB+(A+a)(B+b)+ab]，括号内按位替换数字，[ ]里是说明可留'),
+        ('frustum3', '三棱台',
+         'frustum3(6[下边a],5[下边b],4[下边c],3[上边a],2.5[上边b],2[上边c],1.5[高h])', 0,
+         'V=h/6×(S下+S上+4×S中)，六个边长自动按海伦公式算面积'),
+        ('frustum_c', '圆台',
+         'frustum_c(2[下口半径R],1[上口半径r],3[高h])', 0,
+         'V=πh/3×(R²+r²+R·r)，已知直径先除以 2 变成半径'),
+        ('frustum_ring', '空心圆台',
+         'frustum_ring(2[外下R],1.2[外上r],1.5[内下R1],0.7[内上r1],3[高h])', 0,
+         'V=外圆台−内圆台（内外同高），按位替换五个半径数字'),
     ]),
 ]
 
@@ -4303,6 +4332,8 @@ class MainWindow(QMainWindow):
         <li>Ribbon 三个页签：<b>计算书编辑</b>、<b>数据导出</b>、<b>关于产品</b>。「计算书编辑」按成熟工程量软件的版面分为 <b>文件 / 编辑 / 层级 / 剪贴板 / 表格 / 选项</b> 六组：文件（新建、打开、保存、另存为、最近打开、备份目录、导入表格）；编辑（项目选项、插入计算式 F9、添加计算式、插入明细、插入分部、添加分部、用分部打新）；层级（上移、下移、升级、降级、特殊字符、注释标签）；剪贴板（复制、剪切、删除、粘贴、恢复、撤销）；表格（查找替换、层级设置、表格字体、格式刷、排序、筛选、清除筛选）；选项（选项配置）。<b>「公式编辑」页签已取消</b>，内置函数改由「插入函数」面板调用；「查看公式」「重算」按钮也已取消；F4–F7 插入括号的快捷键仍可用。</li>
         <li>左侧为项目结构树与常量框，右侧为公式辅助框、快捷操作行和工作区表格。分割条上有小箭头按钮可收起 / 展开（宽度会被记住）。<b>分类汇总不再是右侧常驻面板，改为弹窗</b>：在单元格里右键 →「分类汇总…」即可弹出（汇总开着也能继续编辑表格）。</li>
         <li><b>「关于产品」页签（V3.7.2 新增入群反馈）</b>：有「使用说明 / 关于产品 / <b>入群反馈</b>」三个按钮。点「入群反馈」弹出 QQ 群卡片（群号 <b>763124073</b>），<b>群号自动复制到剪贴板</b>，也可一键尝试拉起 QQ 加群；加群可以反馈问题、提建议、获取最新版本。</li>
+        <li><b>序号等列输入也居中（V3.7.3）</b>：序号 / 编号 / 单位 / 工程量默认居中的列，<b>双击进入输入时文字同样居中显示</b>（以前编辑框一律靠左，看着像没居中）。</li>
+        <li><b>插入 / 添加行列可自定义数量（V3.7.3）</b>：插入行、添加计算式、添加列时都会先弹一个小对话框问<b>数量</b>（默认 1，<b>记住上次输入的值</b>，直接回车就是上次的数量）；一次添加多列时列名自动编号。最大行列数与 WPS 表格一致（1048576 行 × 16384 列）。</li>
         </ul>
 
         <h3 style="color:#2f5597;">三、项目结构与层级</h3>
@@ -4345,6 +4376,7 @@ class MainWindow(QMainWindow):
         <li><b>注释</b>：公式中的汉字、<code>[方括号]</code>、<code>{花括号}</code>内容自动忽略，如 <code>4×9.6[柱基预埋]</code> 只计算 4×9.6；方括号常用于写备注。</li>
         <li><b>常量</b>：@加名称，如 <code>@层高=3.6</code>。左下常量框为「常量代码 / 值 / 说明」三列，双击即可修改，不写 @ 会自动补上。常量全部自定义；需要钢筋单重时点「▾」→「插入常用钢筋单重（14 条模板）」，插入后可随意改删。公式里写 <code>@层高×4</code>、<code>@Φ8×12</code> 即可参与计算；引用未定义的常量，该行红色提示“未定义的常量：@xxx”。</li>
         <li><b>函数</b>：ceil 向上取整、floor 向下取整、sqr 平方、sqrt 开平方、round 四舍五入、power(x,n) 幂、pi / π 圆周率、radians 角度转弧度、du 弧度转角度、abs 绝对值、max、min、sum、<b>avg 平均值</b>、sin、cos、tan。点「插入函数」弹出函数面板，点函数名即插入 <code>函数名()</code>，光标停在括号内，每个函数都有写法提示。</li>
+        <li><b>台体快捷公式（V3.7.3）</b>：「插入函数」面板新增<b>台体公式</b>分组——四棱台 frustum4(下底长,下底宽,上底长,上底宽,高)、三棱台 frustum3(下三边,上三边,高)、圆台 frustum_c(下口半径,上口半径,高)、空心圆台 frustum_ring(外下,外上,内下,内上,高)。插入的模板自带 <code>[中文说明]</code> 注释（不参与计算），按位替换示例数字即可，参数含义一眼可见。</li>
         <li><b>括号快捷键</b>：F4 公式前插入 <code>()</code>、F5 插入点插入 <code>()</code>、F6 插入点插入 <code>[]</code>、F7 末尾追加 <code>[]</code>；在单元格里直接打字时也生效。</li>
         <li><b>特殊写法</b>：度分秒如 34°56′30″ 可直接计算；<code>√9=3</code>、<code>√(3+4)</code>、<code>2×√9</code> 均可；写在公式开头的钢筋规格（如 <code>Φ8@200 4×5</code>=20）不参与计算，旧写法 Φ² / Φ³ / Φ⁴ 仍兼容。<b>钢筋等级符号</b>请点「特殊符号」：面板里用 <b>TssdEng（探索者）字体的国标制图符号</b>（一级 HPB300 / 二级 HRB335 / 三级 HRB400 / 四级 HRB500），点击即插入公式；这些符号需 TssdEng 字体显示（软件已随包附带），本机没有该字体时该组会自动隐藏。</li>
         <li><b>汇总与配色</b>：每个分部自动「小计」（XJ 子分部汇总函数已取消，旧工程中的 XJ() 公式仍可正常计算）。公式列与辅助框用同一套配色：数字红、运算符黑、<code>[备注]</code>深绿、汉字淡绿、@常量紫、上标蓝，便于核对。</li>
@@ -4627,6 +4659,12 @@ class MainWindow(QMainWindow):
         item = self.table.item(row, col)
         if item is None:
             item = QTableWidgetItem('')
+            # V3.7.3：新建 item 时应用列默认对齐（序号/编号/单位/工程量/居中自定义列），
+            # 避免填充、粘贴等路径新建的格一律靠左
+            cd = self.project.columns[col] if 0 <= col < len(self.project.columns) else {}
+            key = cd.get('key', '')
+            if key in ('seq', 'code', 'unit', 'value') or cd.get('align') == 'center':
+                item.setTextAlignment(Qt.AlignCenter | Qt.AlignVCenter)
             self.table.setItem(row, col, item)
         item.setText(str(value))
 
@@ -5500,6 +5538,45 @@ class MainWindow(QMainWindow):
         menu.exec_(self.tree.mapToGlobal(pos))
 
     # ---------------- 行操作 ----------------
+    def _ask_insert_count(self, title, settings_key, max_n):
+        """V3.7.3：插入行/列前问一次数量，记住上次值（存 QSettings）。"""
+        try:
+            last = int(self.settings.value(settings_key, 1) or 1)
+        except Exception:
+            last = 1
+        last = max(1, min(last, max_n))
+        n, ok = QInputDialog.getInt(self, title, '数量：', last, 1, max_n)
+        if not ok:
+            return 0
+        self.settings.setValue(settings_key, n)
+        return n
+
+    def insert_rows(self, row, count=1):
+        """在 row 位置插入 count 个空行（V3.7.3 支持批量）。"""
+        sec = self.current_section
+        row = max(0, min(int(row), len(sec.rows)))
+        cap = MAX_ROWS - len(sec.rows)
+        if cap <= 0:
+            QMessageBox.information(self, APP_NAME,
+                                    '已达到最大行数（%d 行），无法继续插入。' % MAX_ROWS)
+            return
+        count = max(1, min(int(count), cap))
+        self.push_undo('插入行')
+        unit = self._auto_unit_for(sec)
+        news = []
+        for _ in range(count):
+            r = Row()
+            if unit:
+                r.unit = unit
+            news.append(r)
+        sec.rows[row:row] = news
+        self.project.recalc()
+        self.refresh_table()
+        self._dirty = True
+        self.table.setCurrentCell(min(row, self.table.rowCount() - 1), 0)
+        if count > 1:
+            self.status.showMessage('已插入 %d 行（Ctrl+Z 可撤销）' % count, 3000)
+
     def insert_row(self, *args):
         """插入空行。工具栏/菜单传入的 bool 信号参数会被忽略；
         若显式传入整数行号，则在该行位置插入。"""
@@ -5512,23 +5589,33 @@ class MainWindow(QMainWindow):
             row = self.table.currentRow()
         if row < 0 or row > len(self.current_section.rows):
             row = len(self.current_section.rows)
-        self.push_undo('插入行')
-        new_row = Row()
-        unit = self._auto_unit_for(self.current_section)
-        if unit:
-            new_row.unit = unit
-        self.current_section.rows.insert(row, new_row)
-        self.project.recalc()
-        self.refresh_table()
-        self._dirty = True
-        self.table.setCurrentCell(min(row, self.table.rowCount() - 1), 0)
+        self.insert_rows(row, 1)
+
+    def _ask_row_count(self):
+        """询问插入行数（不超过剩余上限）。"""
+        cap = MAX_ROWS - len(self.current_section.rows)
+        if cap <= 0:
+            QMessageBox.information(self, APP_NAME,
+                                    '已达到最大行数（%d 行），无法继续插入。' % MAX_ROWS)
+            return 0
+        return self._ask_insert_count('插入行', 'insert_rows_count', cap)
+
+    def append_rows_at_end(self):
+        """行号右键「在末尾追加行」：可自定义数量（V3.7.3）。"""
+        n = self._ask_row_count()
+        if n > 0:
+            self.insert_rows(len(self.current_section.rows), n)
 
     def insert_row_above(self, *args):
-        self.insert_row(max(self.table.currentRow(), 0))
+        n = self._ask_row_count()
+        if n > 0:
+            self.insert_rows(max(self.table.currentRow(), 0), n)
 
     def insert_row_below(self, *args):
         r = self.table.currentRow()
-        self.insert_row(r + 1 if r >= 0 else len(self.current_section.rows))
+        n = self._ask_row_count()
+        if n > 0:
+            self.insert_rows(r + 1 if r >= 0 else len(self.current_section.rows), n)
 
     def enter_on_last_row(self):
         """在最后一行敲回车：自动追加新行并把光标移过去（WPS 同款，V3.3）。"""
@@ -5676,9 +5763,9 @@ class MainWindow(QMainWindow):
         self.table.setCurrentCell(row, 0)
         self.table.selectRow(row)
         menu = QMenu(self)
-        menu.addAction('在上方插入行', lambda r=row: self.insert_row(r))
-        menu.addAction('在下方插入行', lambda r=row: self.insert_row(r + 1))
-        menu.addAction('在末尾追加行', lambda: self.insert_row(self.table.rowCount()))
+        menu.addAction('在上方插入行', self.insert_row_above)
+        menu.addAction('在下方插入行', self.insert_row_below)
+        menu.addAction('在末尾追加行', self.append_rows_at_end)
         menu.addSeparator()
         menu.addAction('删除本行', self.delete_rows)
         color_menu = menu.addMenu('本行底色')
@@ -6227,18 +6314,30 @@ class MainWindow(QMainWindow):
         self.status.showMessage('已将「%s」列 %d 个单元格转为半角（Ctrl+Z 可撤销）' % (cd['title'], n), 5000)
 
     def add_column(self, index):
+        cap = MAX_COLS - len(self.project.columns)
+        if cap <= 0:
+            QMessageBox.information(self, APP_NAME,
+                                    '已达到最大列数（%d 列），无法继续添加。' % MAX_COLS)
+            return
+        # V3.7.3：先问一次添加几列（记住上次值，与 WPS 插入列一致）
+        n = self._ask_insert_count('添加列', 'add_cols_count', cap)
+        if n <= 0:
+            return
         name, ok = QInputDialog.getText(self, '添加列', '列名称：', QLineEdit.Normal, '新列')
         if not ok or not name.strip():
             return
         name = name.strip()
-        key = 'c_' + uuid.uuid4().hex[:8]
         self.push_undo('添加列')
-        # V3.6.1：新增的自定义列默认文本居中对齐（用户仍可右键改对齐）
-        self.project.columns.insert(index, {'key': key, 'title': name, 'width': 120,
-                                            'builtin': False, 'align': 'center'})
+        for i in range(n):
+            key = 'c_' + uuid.uuid4().hex[:8]
+            # V3.6.1：新增的自定义列默认文本居中对齐（用户仍可右键改对齐）
+            # V3.7.3：一次添加多列时自动编号（新列1 / 新列2 …）
+            title = name if n == 1 else '%s%d' % (name, i + 1)
+            self.project.columns.insert(index + i, {'key': key, 'title': title, 'width': 120,
+                                                    'builtin': False, 'align': 'center'})
         self.refresh_table()
         self._dirty = True
-        self.status.showMessage(f'已添加列「{name}」', 3000)
+        self.status.showMessage('已添加 %d 列' % n if n > 1 else '已添加列「%s」' % name, 3000)
 
     def rename_column(self, col):
         cd = self.project.columns[col]
@@ -8378,23 +8477,32 @@ class MainWindow(QMainWindow):
 
     # ---------------- 计算式 / 节点的增删（Ribbon“编辑”组）----------------
     def add_row_at_end(self, *args):
-        """添加计算式：在当前分部末尾追加一行。"""
+        """添加计算式：在当前分部末尾追加一行（V3.7.3 可自定义数量）。"""
         sec = self.current_section
         if sec is None:
             return
+        cap = MAX_ROWS - len(sec.rows)
+        if cap <= 0:
+            QMessageBox.information(self, APP_NAME,
+                                    '已达到最大行数（%d 行），无法继续添加。' % MAX_ROWS)
+            return
+        n = self._ask_insert_count('添加计算式', 'add_rows_count', cap)
+        if n <= 0:
+            return
         self.push_undo('添加计算式')
-        row = Row()
         unit = self._auto_unit_for(sec)
-        if unit:
-            row.unit = unit
-        sec.rows.append(row)
+        for _ in range(n):
+            row = Row()
+            if unit:
+                row.unit = unit
+            sec.rows.append(row)
         self.project.recalc()
         self.refresh_table()
         self._dirty = True
         r = len(sec.rows) - 1
         if r >= 0:
             self.table.setCurrentCell(r, 0)
-        self.status.showMessage('已在末尾添加一行计算式', 2500)
+        self.status.showMessage('已在末尾添加 %d 行计算式' % n, 2500)
 
     def _apply_default_rows(self, sec):
         """新建节点时按「选项配置 → 分部 → 默认计算式个数」预置空行。"""

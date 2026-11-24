@@ -284,7 +284,8 @@ class SortDialog:
     @staticmethod
     def exec(parent, col_titles, cur_col=0):
         from PyQt5.QtWidgets import (QDialog, QRadioButton, QButtonGroup,
-                                     QCheckBox, QDialogButtonBox, QHBoxLayout)
+                                     QCheckBox, QDialogButtonBox, QHBoxLayout,
+                                     QLabel)
         dlg, v = _build_dlg('排序（当前分部）', parent)
         cb_col, _ = _add_combo(v, '排序列：', col_titles)
         cb_col.setCurrentIndex(max(0, min(cur_col, len(col_titles) - 1)))

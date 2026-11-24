@@ -151,6 +151,51 @@ def _avg(*args):
     return sum(args) / len(args)
 
 
+# ---------------- 台体体积（V3.7.3） ----------------
+def _tri_area(a, b, c):
+    """海伦公式：三边求三角形面积；三边不构成三角形时报错。"""
+    p = (a + b + c) / 2.0
+    v = p * (p - a) * (p - b) * (p - c)
+    if v <= 0:
+        raise ValueError('三边无法构成三角形：%g, %g, %g' % (a, b, c))
+    return math.sqrt(v)
+
+
+def _frustum4(a, b, c, d, h):
+    """四棱台体积（拟柱体公式）：下底长a×宽b、上底长c×宽d、高h。
+
+    V = h/6 × [A·B + (A+a)·(B+b) + a·b]
+    """
+    return h / 6.0 * (a * b + (a + c) * (b + d) + c * d)
+
+
+def _frustum3(a1, b1, c1, a2, b2, c2, h):
+    """三棱台体积：下底三边 a1,b1,c1、上底三边 a2,b2,c2、高h。
+
+    V = h/6 × (S下 + S上 + 4×S中)，三个三角形面积按海伦公式由边长算出。
+    """
+    s1 = _tri_area(a1, b1, c1)
+    s2 = _tri_area(a2, b2, c2)
+    s0 = _tri_area((a1 + a2) / 2.0, (b1 + b2) / 2.0, (c1 + c2) / 2.0)
+    return h / 6.0 * (s1 + s2 + 4.0 * s0)
+
+
+def _frustum_c(r_big, r_small, h):
+    """圆台体积：下口半径R、上口半径r、高h。V = πh/3 × (R²+r²+R·r)"""
+    return math.pi * h / 3.0 * (r_big * r_big + r_small * r_small
+                                + r_big * r_small)
+
+
+def _frustum_ring(r_out_big, r_out_small, r_in_big, r_in_small, h):
+    """空心圆台（管状）体积：外圆台下口半径R、上口半径r，内圆台下口半径R1、上口半径r1，高h。
+
+    V = 外圆台 − 内圆台（内外高度相同）。
+    """
+    outer = _frustum_c(r_out_big, r_out_small, h)
+    inner = _frustum_c(r_in_big, r_in_small, h)
+    return outer - inner
+
+
 FUNCTIONS = {
     'ceil': math.ceil,
     'floor': math.floor,
@@ -169,6 +214,11 @@ FUNCTIONS = {
     'tan': math.tan,
     'sum': sum,
     'avg': _avg,
+    # V3.7.3 台体公式
+    'frustum4': _frustum4,
+    'frustum3': _frustum3,
+    'frustum_c': _frustum_c,
+    'frustum_ring': _frustum_ring,
 }
 
 CONSTANTS = {
@@ -334,8 +384,9 @@ class FormulaEngine:
         # 开根号 √ → sqrt()：√9、√(3+4)、2√9、√9×4 均可直接算
         s = convert_sqrt(s)
         # 隐式乘法：)( → )*(  、数字( → 数字*(   、数字sqrt → 数字*sqrt
+        # V3.7.3：数字前若是字母（函数名以数字结尾，如 frustum4(...)）不插乘号
         s = re.sub(r'\)\s*\(', ')*(', s)
-        s = re.sub(r'(\d|\))\s*\(', r'\1*(', s)
+        s = re.sub(r'(?<![A-Za-z_])(\d|\))\s*\(', r'\1*(', s)
         s = re.sub(r'(\d)(?=[A-Za-z_])', r'\1*', s)
         s = re.sub(r'\)(?=[A-Za-z_])', r')*', s)
         s = re.sub(r'\s+', '', s)
