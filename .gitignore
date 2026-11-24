@@ -24,3 +24,6 @@ dist/
 Thumbs.db
 desktop.ini
 .DS_Store
+
+# 验证下载用的历史版本 exe，不入库
+CalcBook-v*.exe

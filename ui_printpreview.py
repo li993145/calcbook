@@ -74,12 +74,18 @@ class ReportRenderer:
 
     Qt 富文本不支持跨页重复表头（<thead> 只出现在表格顶部），所以这里：
     1) 头部单独做成一个文档（报表页眉 + 标题 + 表头行）；
-    2) 正文文档按每页可用高度自动分页；
-    3) 绘制每一页时先画头部，再画该页正文切片 —— 于是每页都有表头。
+    2) 正文手动分页：逐行测高、按每页可用高度装箱，每页一个独立文档
+       —— Qt 对放不进当页剩余空间的表格行会直接从页边界切半
+       （实测），只有手动装箱才能保证整行绝不跨页；
+    3) 绘制每一页时先画头部，再画该页正文 —— 于是每页都有表头。
+
+    兼容旧接口：body_rows=None 时仍按整份 body_html 交给 Qt 自动分页
+    （该路径行会被切开，仅保留给老调用方）。
     """
 
     def __init__(self, head_html, body_html, content_w, content_h,
-                 footer_left='', footer_center='', footer_right='', show_page_no=True):
+                 footer_left='', footer_center='', footer_right='', show_page_no=True,
+                 body_rows=None, table_open=''):
         self.content_w = max(40.0, float(content_w))
         self.content_h = max(40.0, float(content_h))
         self.footer_left = footer_left or ''
@@ -91,12 +97,79 @@ class ReportRenderer:
                                  self.footer_right or self.show_page_no) else 0.0
         # 正文每页的高度 = 可用高度 - 头部高度 - 页脚高度
         self.head = self._make_doc(head_html, QSizeF(self.content_w, max(self.content_h, 1000.0)))
-        self.body = self._make_doc(body_html, QSizeF(self.content_w, 1000.0))
-        self.head_h = self._measure(self.head)
+        # 头部高度按 documentSize 量（含表格边框/内边距，块测量会少算几个像素）
+        self.head_h = max(0.0, float(self.head.documentLayout().documentSize().height()))
         self.body_page_h = max(40.0, self.content_h - self.head_h - self.footer_h)
-        # 正文按“每页可用高度”重新排版，分页才和纸张对得上
-        self.body.setPageSize(QSizeF(self.content_w, self.body_page_h))
-        self.page_count = max(1, self.body.documentLayout().pageCount())
+        if body_rows is not None:
+            # 手动装箱分页：每页元素 = (文档, 该页在文档里的纵向起点)
+            self._pages = self._paginate_rows(body_rows, table_open)
+        else:
+            # 旧路径：整份正文交给 Qt 自动分页
+            self.body = self._make_doc(body_html, QSizeF(self.content_w, 1000.0))
+            self.body.setPageSize(QSizeF(self.content_w, self.body_page_h))
+            self._pages = [(self.body, i * self.body_page_h)
+                           for i in range(max(1, self.body.documentLayout().pageCount()))]
+        self.page_count = max(1, len(self._pages))
+
+    # ---------- 手动分页 ----------
+    # 行高按 documentSize 原值测（比真实高度多算一个隐式尾段 ≈ 5~8px，
+    # 偏保守方向，不会把行挤出页外）；整页校验时给这个余量。
+    _IMPLICIT_PARA = 8.0
+
+    def _paginate_rows(self, rows, table_open):
+        """逐行测高 + 贪心装箱 + 整页校验：整行绝不跨页。
+
+        单行连一页都放不下时：该行单独成文档、按 body_page_h 由 Qt
+        拆成若干页续页显示（极端长计算式，保内容完整）。
+        """
+        budget = self.body_page_h + self._IMPLICIT_PARA
+        heights = [measure_table_h((table_open or '') + html + '</table>', self.content_w)
+                   for html in rows]
+        items = list(zip(rows, heights))
+        pages = []
+        i, n = 0, len(items)
+        while i < n:
+            cur, cur_h = [], 0.0
+            while i < n:
+                html, h = items[i]
+                if h > budget:
+                    break                    # 超页行单独处理
+                if cur and cur_h + h > budget:
+                    break                    # 这行放不下：整行挪到下一页
+                cur.append(html)
+                cur_h += h
+                i += 1
+            if cur:
+                # 整页校验：按页文档实测高度核对，实测超页就往后退行
+                while cur:
+                    doc = self._page_doc(cur, table_open)
+                    ph = float(doc.documentLayout().documentSize().height())
+                    if ph - self._IMPLICIT_PARA <= self.body_page_h + 0.5:
+                        pages.append((doc, 0.0))
+                        break
+                    if len(cur) == 1:
+                        # 单行实测就超页（理论上上游已缩字号）：按页高拆续页
+                        doc.setPageSize(QSizeF(self.content_w, self.body_page_h))
+                        cnt = max(1, doc.documentLayout().pageCount())
+                        for k in range(cnt):
+                            pages.append((doc, k * self.body_page_h))
+                        break
+                    cur.pop()
+            if i < n and items[i][1] > budget:
+                # 整行超页：单独一个文档按页高分页，续页也进页序列
+                doc = self._make_doc((table_open or '') + items[i][0] + '</table>',
+                                     QSizeF(self.content_w, self.body_page_h))
+                cnt = max(1, doc.documentLayout().pageCount())
+                for k in range(cnt):
+                    pages.append((doc, k * self.body_page_h))
+                i += 1
+        if not pages:
+            pages.append((self._make_doc('', QSizeF(self.content_w, self.body_page_h)), 0.0))
+        return pages
+
+    def _page_doc(self, rows, table_open):
+        return self._make_doc((table_open or '') + ''.join(rows) + '</table>',
+                              QSizeF(self.content_w, 100000.0))
 
     @staticmethod
     def _make_doc(html, page_size=None):
@@ -128,6 +201,8 @@ class ReportRenderer:
     # ---------- 绘制 ----------
     def draw_page(self, painter, index, x=0.0, y=0.0):
         """把第 index 页画到 painter 的 (x, y)（逻辑像素）。"""
+        index = max(0, min(index, self.page_count - 1))
+        doc, top = self._pages[index]
         painter.save()
         painter.translate(x, y)
         painter.setClipRect(QRectF(0, 0, self.content_w, self.content_h))
@@ -135,8 +210,7 @@ class ReportRenderer:
         self._draw_slice(self.head, painter,
                          QRectF(0, 0, self.content_w, self.head_h), 0.0)
         # 正文：只画属于本页的那一段
-        top = index * self.body_page_h
-        self._draw_slice(self.body, painter,
+        self._draw_slice(doc, painter,
                          QRectF(0, top, self.content_w, self.body_page_h), self.head_h)
         # 页脚：左 / 中 / 右三栏，中间固定带“第 X 页，共 Y 页”
         if self.footer_h:
@@ -188,6 +262,36 @@ def measure_html(html, width):
         return 0.0
 
 
+_ROW_H_CACHE = {}
+
+
+def measure_table_h(html, width):
+    """测量表格 HTML 的真实高度（含单元格内边距与边框）。
+
+    实测：QTextDocument 的 documentSize 恒等于排版后内容的真实底边
+    （表格的 padding / 边框都算在内），而按文字块底部测量的 _measure
+    会把最后一个单元格的下内边距和边框漏掉，每行少算几个像素、
+    整页累积起来就把最后一行挤出页外 —— 手动分页必须用 documentSize。
+    """
+    try:
+        key = (round(float(width)), hash(html or ''))
+        got = _ROW_H_CACHE.get(key)
+        if got is not None:
+            return got
+        doc = QTextDocument()
+        doc.setDefaultFont(QFont('微软雅黑', 10))
+        doc.setDocumentMargin(0)
+        doc.setHtml(html or '')
+        doc.setPageSize(QSizeF(max(40.0, float(width)), 100000.0))
+        h = max(0.0, float(doc.documentLayout().documentSize().height()))
+        if len(_ROW_H_CACHE) > 4000:
+            _ROW_H_CACHE.clear()
+        _ROW_H_CACHE[key] = h
+        return h
+    except Exception:
+        return 0.0
+
+
 class PageCanvas(QWidget):
     """纸张画布：绘制分页内容 + 四条页边距虚线（可拖动）。
 
@@ -203,6 +307,8 @@ class PageCanvas(QWidget):
         super().__init__(parent)
         self.head_html = ''
         self.body_html = ''
+        self.body_rows = None
+        self.table_open = ''
         self.footer_left = ''
         self.footer_center = ''
         self.footer_right = ''
@@ -249,9 +355,12 @@ class PageCanvas(QWidget):
     # ---------- 数据 ----------
     def set_content(self, head_html, body_html, margins=None, landscape=False,
                     zoom=None, paper=None, footer_left='', footer_center='',
-                    footer_right='', show_page_no=True):
+                    footer_right='', show_page_no=True,
+                    body_rows=None, table_open=''):
         self.head_html = head_html or ''
         self.body_html = body_html or ''
+        self.body_rows = body_rows
+        self.table_open = table_open or ''
         self.footer_left = footer_left or ''
         self.footer_center = footer_center or ''
         self.footer_right = footer_right or ''
@@ -281,7 +390,8 @@ class PageCanvas(QWidget):
         ch = max(40.0, (h_cm - self.margins['top'] - self.margins['bottom']) * px_per_cm())
         self._renderer = ReportRenderer(
             self.head_html, self.body_html, cw, ch,
-            self.footer_left, self.footer_center, self.footer_right, self.show_page_no)
+            self.footer_left, self.footer_center, self.footer_right, self.show_page_no,
+            body_rows=self.body_rows, table_open=self.table_open)
         self._content = (cw * self.zoom, ch * self.zoom)      # 设备像素
         self._page_count = self._renderer.page_count
         total_h = self._page_count * h + (self._page_count - 1) * self.GAP + 2 * self.PAD
@@ -568,12 +678,14 @@ class PrintPreviewPane(QWidget):
         self.canvas.landscape = rep.get('orientation') == 'landscape'
         self.canvas.margins = dict(vals)
         cw, ch = self.canvas.content_px()
-        body_html = self.win.report_body_html(cw, ch)
-        self.canvas.set_content(self.win.report_head_html(), body_html,
+        table_open = self.win.report_table_open_html()
+        body_rows = self.win.report_body_rows(cw, ch)
+        self.canvas.set_content(self.win.report_head_html(), '',
                                 vals, rep.get('orientation') == 'landscape',
                                 paper=(w_mm, h_mm),
                                 footer_left=fl, footer_center=fc, footer_right=fr,
-                                show_page_no=True)
+                                show_page_no=True,
+                                body_rows=body_rows, table_open=table_open)
         self._apply_zoom()
         # 首次显示时 viewport 尺寸还没定，等布局完成再按宽度适配一次
         QTimer.singleShot(0, self._apply_zoom)

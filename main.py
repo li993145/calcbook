@@ -39,7 +39,7 @@ from ui_report import ReportViewerDialog
 APP_NAME = "工程量计算书"
 # 本表内部复制/剪切的结构化剪贴板格式（多行整行复制 → 粘到任意位置插入行，不覆盖已有数据）
 CB_ROWS_MIME = 'application/x-calcbook-rows'
-APP_VER = "3.7.1"
+APP_VER = "3.7.2"
 FILE_EXT = '.gcls'          # 工程文件后缀（内容仍是 JSON，便于排查与迁移）
 # V3.6.1：备份默认放到固定目录，不再跟随工程文件所在目录；启动时自动创建。
 DEFAULT_BACKUP_DIR = r'D:\手算工程量计算书\bak'
@@ -3555,6 +3555,7 @@ class MainWindow(QMainWindow):
                 ('关于', [
                     ('使用说明', 'doc', self.show_formula_help, '', True),
                     ('关于产品', 'settings', self.show_about, '', False),
+                    ('入群反馈', 'add', self.show_feedback_group, '', True),
                 ]),
             ],
         }
@@ -4301,6 +4302,7 @@ class MainWindow(QMainWindow):
         <li>标题栏空白处按住可拖动窗口，双击最大化 / 还原；鼠标移到窗口边缘可拖拽调整大小。路径过长时中间省略，鼠标悬停可看全路径。</li>
         <li>Ribbon 三个页签：<b>计算书编辑</b>、<b>数据导出</b>、<b>关于产品</b>。「计算书编辑」按成熟工程量软件的版面分为 <b>文件 / 编辑 / 层级 / 剪贴板 / 表格 / 选项</b> 六组：文件（新建、打开、保存、另存为、最近打开、备份目录、导入表格）；编辑（项目选项、插入计算式 F9、添加计算式、插入明细、插入分部、添加分部、用分部打新）；层级（上移、下移、升级、降级、特殊字符、注释标签）；剪贴板（复制、剪切、删除、粘贴、恢复、撤销）；表格（查找替换、层级设置、表格字体、格式刷、排序、筛选、清除筛选）；选项（选项配置）。<b>「公式编辑」页签已取消</b>，内置函数改由「插入函数」面板调用；「查看公式」「重算」按钮也已取消；F4–F7 插入括号的快捷键仍可用。</li>
         <li>左侧为项目结构树与常量框，右侧为公式辅助框、快捷操作行和工作区表格。分割条上有小箭头按钮可收起 / 展开（宽度会被记住）。<b>分类汇总不再是右侧常驻面板，改为弹窗</b>：在单元格里右键 →「分类汇总…」即可弹出（汇总开着也能继续编辑表格）。</li>
+        <li><b>「关于产品」页签（V3.7.2 新增入群反馈）</b>：有「使用说明 / 关于产品 / <b>入群反馈</b>」三个按钮。点「入群反馈」弹出 QQ 群卡片（群号 <b>763124073</b>），<b>群号自动复制到剪贴板</b>，也可一键尝试拉起 QQ 加群；加群可以反馈问题、提建议、获取最新版本。</li>
         </ul>
 
         <h3 style="color:#2f5597;">三、项目结构与层级</h3>
@@ -4350,7 +4352,7 @@ class MainWindow(QMainWindow):
 
         <h3 style="color:#2f5597;">七、打印与导出</h3>
         <ul>
-        <li><b>打印 / 预览</b>：Ctrl+P 调出系统打印对话框，可选打印机、份数、页码范围，也可选“Microsoft Print to PDF”存成 PDF。「打印预览」按纸张实际比例分页显示，鼠标拖动页面上的蓝色虚线即可调整页边距，上方数值框同步更新；预览与实际打印的分页完全一致，<b>每页都会重复报表标题和表头行</b>。</li>
+        <li><b>打印 / 预览</b>：Ctrl+P 调出系统打印对话框，可选打印机、份数、页码范围，也可选“Microsoft Print to PDF”存成 PDF。「打印预览」按纸张实际比例分页显示，鼠标拖动页面上的蓝色虚线即可调整页边距，上方数值框同步更新；预览与实际打印的分页完全一致，<b>每页都会重复报表标题和表头行</b>。<b>V3.7.2 修复</b>：改用手动逐行分页（逐行测高、按页高装箱）——以前行落在页边界上会被从中间切开，长计算式印不全；现在<b>整行永远完整地待在同一页</b>，放不下就整行挪到下一页，实在高过一页的行会先自动缩字号，仍超页才拆成续页。</li>
         <li><b>长计算式不再被切一半（V3.7.1）</b>：计算式很长、在单元格里换行后高过整页时，打印会自动把<b>该行字号缩小</b>，保证<b>整行完整印在一页里</b>（以前是从页中间断开，看不全后半截）。缩过字号的行数会在打印完成后的状态栏提示。</li>
         <li><b>页面设置</b>：可设表头标题、页眉、<b>页脚左 / 中 / 右三栏</b>（一般放编制人、复核人、日期等签字信息）、上 / 下 / 左 / 右页边距、纸张方向、纸张大小（下拉列出系统打印机支持的纸型，选“自定义”可填宽高 mm）、水平 / 垂直对齐。打印和预览每页底部自动显示「第 X 页，共 Y 页」，无需手动填页码。</li>
         <li><b>打印区域</b>：在表格里框选单元格后<b>右键 →「设置打印区域」</b>，报表只输出选中的行列，小计也只算选中行；右键「清除打印区域」恢复打印整张计算书。快捷操作行的「打印选中区域」也可直接使用。</li>
@@ -7635,27 +7637,31 @@ class MainWindow(QMainWindow):
         parts.append('</table>')
         return ''.join(parts)
 
-    def report_body_html(self, content_w=None, content_h=None):
-        """报表「正文」：数据表格（不含表头行）+ 页脚。
+    def report_body_rows(self, content_w=None, content_h=None):
+        """报表正文各行（<tr>…</tr> 列表），供手动分页与整份 HTML 共用。
 
-        content_w / content_h 传入时，会把「因换行而高过整页」的单元格
-        自动缩小字号 —— Qt 富文本会把高于一页的表格行从中间切断，
-        那样长计算式就印不全了；缩到一页以内才能整行完整印出来。
+        content_w / content_h 传入时：把「高过一页」的行自动缩字号；
+        配合 ReportRenderer 的逐行装箱分页，保证任何行都不会被页边界
+        从中间切开 —— Qt 富文本对放不进当页剩余空间的表格行是直接
+        切半续到下一页的（实测），所以必须自己按行分页。
         """
-        from ui_printpreview import measure_html
+        from ui_printpreview import measure_table_h
         va, ha = self._report_style()
         area = getattr(self, '_print_area', None)
         cols = self._active_columns()
         ncol = len(cols)
         pct = self._report_col_pct()
-        parts = [self._report_table_open(pct)]
         # 每页正文可用高度（扣掉每页都有的表头与页脚）
         avail_h = 0.0
         if content_w and content_h:
-            head_h = measure_html(self.report_head_html(), content_w)
+            head_h = measure_table_h(self.report_head_html(), content_w)
             avail_h = max(60.0, float(content_h) - head_h - 30.0)
         self._print_shrunk = 0
         self._print_oversize = 0
+        # 行高缓存：同一行 HTML 反复刷新预览时不必重复建文档测量
+        cache = getattr(self, '_row_h_cache', None)
+        if cache is None:
+            cache = self._row_h_cache = {}
 
         def cell_texts(r):
             out = []
@@ -7691,45 +7697,49 @@ class MainWindow(QMainWindow):
             return '<tr>' + ''.join(tds) + '</tr>'
 
         def measure_row(html_row):
-            """单独量一行的高度（放进同样列宽的表格里量）。"""
+            """单独量一行的高度（放进同样列宽的表格里量，带缓存）。
+
+            用 measure_table_h（documentSize 口径，含单元格内边距与
+            边框）—— 与 ReportRenderer 手动分页用的是同一把尺子。
+            """
+            if not (content_w and avail_h):
+                return 0.0
+            got = cache.get(html_row)
+            if got is not None:
+                return got
             html = ('<table border="1" cellspacing="0" cellpadding="3" width="100%" '
                     'style="font-size:9pt;vertical-align:' + va + '">')
             html += '<colgroup>' + ''.join('<col width="%.1f%%">' % x for x in pct)
             html += '</colgroup>' + html_row + '</table>'
-            return measure_html(html, content_w)
+            h = measure_table_h(html, content_w)
+            cache[html_row] = h
+            return h
 
-        def estimate_row_h(texts):
-            """粗估行高（避免为每一行都建文档测高）。"""
-            lines = 1
-            for t, p in zip(texts, pct):
-                cpl = max(4.0, (content_w * p / 100.0) / 9.0)
-                lines = max(lines, int(len(t) / cpl) + 1)
-            return lines * 16.0 + 14.0
+        rows = []
 
         def walk(sec, level=0):
-            parts.append(f'<tr><td colspan="{ncol}" style="background:#fff2cc"><b>{"　"*level}{sec.name}</b></td></tr>')
+            hdr = f'<tr><td colspan="{ncol}" style="background:#fff2cc"><b>{"　"*level}{sec.name}</b></td></tr>'
+            rows.append(hdr)
             for ri, r in enumerate(sec.rows):
                 if area and (sec is not area.get('section') or ri not in area.get('rows', ())):
                     continue
-                texts = cell_texts(r)
                 html_row = row_html(r, 9.0)
                 if avail_h:
-                    if estimate_row_h(texts) > avail_h * 0.75:
-                        h = measure_row(html_row)
-                        if h > avail_h:
-                            done = False
-                            for pt in (8.0, 7.0, 6.5, 6.0, 5.5, 5.0):
-                                trial = row_html(r, pt)
-                                if measure_row(trial) <= avail_h:
-                                    html_row = trial
-                                    self._print_shrunk += 1
-                                    done = True
-                                    break
-                            if not done:
-                                # 缩到最小仍超页：交给 Qt 切分，至少内容都在
-                                html_row = row_html(r, 5.0)
-                                self._print_oversize += 1
-                parts.append(html_row)
+                    h = measure_row(html_row)
+                    if h > avail_h:
+                        done = False
+                        for pt in (8.0, 7.0, 6.5, 6.0, 5.5, 5.0):
+                            trial = row_html(r, pt)
+                            if measure_row(trial) <= avail_h:
+                                html_row = trial
+                                self._print_shrunk += 1
+                                done = True
+                                break
+                        if not done:
+                            # 缩到最小仍超页：单独占页并交给渲染器按页拆开，至少内容都在
+                            html_row = row_html(r, 5.0)
+                            self._print_oversize += 1
+                rows.append(html_row)
             if area and sec is area.get('section'):
                 vals = [r.value for ri, r in enumerate(sec.rows)
                         if ri in area.get('rows', ()) and not getattr(r, 'no_count', False)
@@ -7745,7 +7755,7 @@ class MainWindow(QMainWindow):
                         vidx = _i
                         break
                 tail = ''.join('<td></td>' for _ in range(ncol - vidx - 1))
-                parts.append(
+                rows.append(
                     '<tr style="background:#e2efda">'
                     f'<td colspan="{max(1, vidx)}" align="right"><b>小计</b></td>'
                     f'<td width="{pct[vidx]:.1f}%"><b>{fmt_num(t, section_precision(sec, self.precision))}</b></td>'
@@ -7754,6 +7764,20 @@ class MainWindow(QMainWindow):
                 walk(c, level + 1)
         for book in (self.project.books or [self.project.root]):
             walk(book, 0)
+        return rows
+
+    def report_table_open_html(self):
+        """正文表格的 <table> 开头（列宽已按当前列定义分配），供手动分页拼页使用。"""
+        return self._report_table_open(self._report_col_pct())
+
+    def report_body_html(self, content_w=None, content_h=None):
+        """报表「正文」：数据表格（不含表头行），整份一个字符串。
+
+        仅用于不关心分页的场合（HTML 导出等）；预览 / 打印走
+        report_body_rows + ReportRenderer 手动分页，整行不跨页。
+        """
+        parts = [self.report_table_open_html()]
+        parts += self.report_body_rows(content_w, content_h)
         parts.append('</table>')
         # 页脚统一由 ReportRenderer 在每页底部绘制（左/中/右 + 自动页码），这里不再插入
         return ''.join(parts)
@@ -7902,10 +7926,12 @@ class MainWindow(QMainWindow):
         cw = rect.width() / scale
         ch = rect.height() / scale
         fl, fc, fr = self.footer_fields()
-        # 正文按真实可打印高度生成：过高的行自动缩字号，整行不会被页边界切断
-        body_html = self.report_body_html(cw, ch)
-        renderer = ReportRenderer(self.report_head_html(), body_html, cw, ch,
-                                  fl, fc, fr, show_page_no=True)
+        # 正文逐行装箱手动分页：整行绝不跨页；超页的行先缩字号，仍超才续页
+        body_rows = self.report_body_rows(cw, ch)
+        renderer = ReportRenderer(self.report_head_html(), None, cw, ch,
+                                  fl, fc, fr, show_page_no=True,
+                                  body_rows=body_rows,
+                                  table_open=self.report_table_open_html())
         painter = QPainter(printer)
         try:
             painter.scale(scale, scale)
@@ -8713,6 +8739,58 @@ class MainWindow(QMainWindow):
                           '面板可收起、删除全部数据、'
                           '纸张大小可选（跟随打印机支持的纸型）、报表打印预览与直接打印、'
                           'Excel/WPS 导出、自动保存与备份。</p>')
+
+    def show_feedback_group(self):
+        """入群反馈：QQ 群 763124073。打开弹窗即自动复制群号，
+        并可一键尝试拉起 QQ 加群卡片（没装 QQ 时给出手动加群提示）。"""
+        group_no = '763124073'
+        # 一进弹窗就把群号放到剪贴板，用户直接去 QQ 粘贴即可
+        QApplication.clipboard().setText(group_no)
+        dlg = QDialog(self)
+        dlg.setWindowTitle('入群反馈 - 工程量计算书')
+        dlg.setModal(True)
+        lay = QVBoxLayout(dlg)
+        lay.setSpacing(10)
+        tip = QLabel(
+            '<div style="line-height:150%">'
+            '<p style="font-size:11pt"><b>欢迎加入用户群反馈问题与建议</b></p>'
+            f'<p>QQ 群号：<b style="font-size:14pt;color:#c0392b">{group_no}</b>'
+            '&nbsp;&nbsp;<span style="color:#7a828c">（已自动复制，去 QQ 粘贴即可）</span></p>'
+            '<p style="color:#7a828c">加群后可以：反馈使用中遇到的问题、提功能建议、'
+            '获取最新版本与使用技巧。</p>'
+            '</div>')
+        tip.setTextFormat(Qt.RichText)
+        tip.setWordWrap(True)
+        lay.addWidget(tip)
+        btns = QHBoxLayout()
+        btn_open = QPushButton('打开 QQ 加群')
+        btn_copy = QPushButton('复制群号')
+        btn_close = QPushButton('关闭')
+        btn_open.setDefault(True)
+
+        def try_open():
+            url = QUrl('mqqapi://card/show_pslcard?src_type=internal&version=1'
+                       '&uin=%s&card_type=group&source=qrcode' % group_no)
+            if not QDesktopServices.openUrl(url):
+                QMessageBox.information(
+                    dlg, '未能打开 QQ',
+                    '没有检测到 QQ（或未响应）。\n群号 %s 已复制到剪贴板，'
+                    '请打开 QQ 手动搜索群号加群。' % group_no)
+
+        def do_copy():
+            QApplication.clipboard().setText(group_no)
+            self.status.showMessage('群号 %s 已复制' % group_no, 2500)
+
+        btn_open.clicked.connect(try_open)
+        btn_copy.clicked.connect(do_copy)
+        btn_close.clicked.connect(dlg.accept)
+        btns.addStretch(1)
+        btns.addWidget(btn_open)
+        btns.addWidget(btn_copy)
+        btns.addWidget(btn_close)
+        lay.addLayout(btns)
+        dlg.setMinimumWidth(380)
+        dlg.exec_()
 
     def show_formula_help(self):
         self.tabs.setCurrentIndex(2)
