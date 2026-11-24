@@ -20,16 +20,18 @@ DEFAULT_LEVELS = ['单项工程', '单位工程', '分部工程', '分项工程'
 # 计算公式/图纸编号/大样图来源/不计/备注）。新增列时这些宽度不得被重置。
 DEFAULT_COLUMNS = [
     {'key': 'seq', 'title': '序号', 'width': 80, 'builtin': True},
-    {'key': 'code', 'title': '编号', 'width': 135, 'builtin': True},
+    # V3.7.7：编号→清单编号、单位→计量单位；顺序调整为
+    # 序号/清单编号/项目名称/计量单位/计算公式/工程量/图纸编号/图纸/备注/不计
+    # （大样图来源列取消；工程量是计算结果列，放在计算公式后面）
+    {'key': 'code', 'title': '清单编号', 'width': 135, 'builtin': True},
     {'key': 'name', 'title': '项目名称', 'width': 340, 'builtin': True},
-    {'key': 'unit', 'title': '单位', 'width': 80, 'builtin': True},
-    {'key': 'value', 'title': '工程量', 'width': 100, 'builtin': True},
+    {'key': 'unit', 'title': '计量单位', 'width': 80, 'builtin': True},
     {'key': 'formula', 'title': '计算公式', 'width': 600, 'builtin': True},
-    {'key': 'img', 'title': '图纸', 'width': 110, 'builtin': True},
+    {'key': 'value', 'title': '工程量', 'width': 100, 'builtin': True},
     {'key': 'drawing_no', 'title': '图纸编号', 'width': 150, 'builtin': True},
-    {'key': 'detail_source', 'title': '大样图来源', 'width': 150, 'builtin': True},
-    {'key': 'no_count', 'title': '不计', 'width': 80, 'builtin': True},
+    {'key': 'img', 'title': '图纸', 'width': 110, 'builtin': True},
     {'key': 'remark', 'title': '备注', 'width': 200, 'builtin': True},
+    {'key': 'no_count', 'title': '不计', 'width': 80, 'builtin': True},
 ]
 
 # V3.5 及以前的默认宽度：用于判断老工程里某列宽度是否被用户手动改过
@@ -90,6 +92,46 @@ def ensure_img_column(cols):
                     if str(c.get('key', '')) == 'drawing_no'), 0)
     result.insert(pos, {'key': 'img', 'title': '图纸', 'width': 110,
                         'builtin': True})
+    return result
+
+
+# V3.7.7 新默认列顺序（apply_column_order_v377 用）
+_V377_ORDER = [c['key'] for c in DEFAULT_COLUMNS]
+# 内置列改名的映射：只有当老工程里还是旧默认名时才改，自定义名称不动
+_V377_RENAME = {'code': {'编号': '清单编号'}, 'unit': {'单位': '计量单位'}}
+
+
+def apply_column_order_v377(cols):
+    """V3.7.7：把工程列按新默认顺序重排 + 内置列改名（清单编号/计量单位），
+    并去掉「大样图来源」列。
+
+    * 只动顺序和内置列标题，**每列自己的宽度等设置原样保留**；
+    * 大样图来源列从表里取消（单元格数据存在 Row.custom 里，不丢）；
+    * 用户自建的自定义列排在内置列后面，相对顺序不变。
+    """
+    if not cols:
+        return [dict(c) for c in DEFAULT_COLUMNS]
+    by_key = {}
+    rest = []
+    for c in cols:
+        k = str(c.get('key', ''))
+        if k in _V377_ORDER and k not in by_key:
+            by_key[k] = dict(c)
+        else:
+            rest.append(dict(c))         # 自定义列 / 未识别列（含大样图来源外溢）
+    result = []
+    for k in _V377_ORDER:
+        c = by_key.pop(k, None)
+        if c is None:
+            c = next((dict(d) for d in DEFAULT_COLUMNS if d['key'] == k), None)
+        if c is None:
+            continue
+        ren = _V377_RENAME.get(k)
+        if ren and c.get('title') in ren:
+            c['title'] = ren[c.get('title')]
+        result.append(c)
+    # 大样图来源列不再显示；其余自定义列原样接在后面
+    result.extend(c for c in rest if str(c.get('key', '')) != 'detail_source')
     return result
 
 
@@ -209,9 +251,11 @@ class Project:
         # 一个工程可包含多个单项工程，每个单项工程是一棵独立的树
         self.books = [Section("单项工程1")]
         self.engine = FormulaEngine(self.constants)
-        # 冻结窗格（V3.2）：冻结的行数/列数（视图状态，随工程保存）
+        # 冻结窗格（V3.2）：视图状态，随工程保存
         self.freeze_rows = 0
         self.freeze_cols = 0
+        # V3.7.7：新工程直接就是新列序，不需要再迁移
+        self.col_order_v377 = True
 
     @property
     def root(self):
@@ -310,6 +354,7 @@ class Project:
                     columns=self.columns, report=self.report,
                     freeze_rows=getattr(self, 'freeze_rows', 0),
                     freeze_cols=getattr(self, 'freeze_cols', 0),
+                    col_order_v377=getattr(self, 'col_order_v377', False),
                     books=[b.to_dict() for b in self.books],
                     root=self.books[0].to_dict() if self.books else None, version=4)
 
@@ -332,6 +377,12 @@ class Project:
         p.levels = lv or list(DEFAULT_LEVELS)
         # 列定义：兼容旧工程（无 columns 或空列表则用默认）
         p.columns = migrate_columns(d.get('columns') or [dict(c) for c in DEFAULT_COLUMNS])
+        # V3.7.7：老工程一次性按新默认顺序重排 + 内置列改名（清单编号/计量单位），
+        # 之后再打开不再动（尊重用户自己拖动过的列序）；每列宽度原样保留
+        p.col_order_v377 = bool(d.get('col_order_v377', False))
+        if not p.col_order_v377:
+            p.columns = apply_column_order_v377(p.columns)
+            p.col_order_v377 = True
         # 冻结窗格（V3.2）：旧工程无此字段默认不冻结
         try:
             p.freeze_rows = max(0, int(d.get('freeze_rows') or 0))

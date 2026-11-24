@@ -134,18 +134,22 @@ class _CaptureOverlay(QWidget):
 
     # ---------- 工具条 ----------
     def _build_toolbar(self):
+        """V3.7.7：参照成熟截图工具——按钮条贴在选区右下角，紧凑深色小按钮。"""
         tb = QWidget(self)
         tb.setStyleSheet(
-            'QWidget { background: rgba(38,38,38,240); border-radius: 5px; }'
-            'QPushButton { color:#ffffff; background: transparent; border: none;'
-            '             padding: 3px 9px; font-size: 12px; }'
-            'QPushButton:hover { background: rgba(255,255,255,45); }'
-            'QPushButton:checked { background: #2f7de0; }'
-            'QPushButton#ok { background: #2f7de0; }'
+            'QWidget { background: rgba(32,32,32,232); border-radius: 4px; }'
+            'QPushButton { color:#e8e8e8; background: transparent; border: none;'
+            '             padding: 2px 8px; font-size: 12px; }'
+            'QPushButton:hover { background: rgba(255,255,255,40); }'
+            'QPushButton:checked { background: #2f7de0; color: #ffffff; }'
+            'QPushButton#ok { background: #2f7de0; color: #ffffff; }'
             'QPushButton#ok:hover { background: #4f97ec; }')
         lay = QHBoxLayout(tb)
-        lay.setContentsMargins(5, 2, 5, 2)
-        lay.setSpacing(1)
+        lay.setContentsMargins(3, 1, 3, 1)
+        lay.setSpacing(0)
+        b_ok = QPushButton('确认截图', tb)
+        b_ok.setObjectName('ok')
+        b_ok.clicked.connect(self._confirm)
         b_rect = QPushButton('矩形', tb)
         b_ell = QPushButton('椭圆', tb)
         for b in (b_rect, b_ell):
@@ -157,14 +161,11 @@ class _CaptureOverlay(QWidget):
         grp.addButton(b_ell)
         b_rect.clicked.connect(lambda: self._set_shape('rect'))
         b_ell.clicked.connect(lambda: self._set_shape('ellipse'))
-        b_ok = QPushButton('确认截图', tb)
-        b_ok.setObjectName('ok')
-        b_ok.clicked.connect(self._confirm)
         b_re = QPushButton('重新选择', tb)
         b_re.clicked.connect(self._reselect)
         b_cancel = QPushButton('取消', tb)
         b_cancel.clicked.connect(self._loop.quit)
-        for b in (b_rect, b_ell, b_ok, b_re, b_cancel):
+        for b in (b_ok, b_rect, b_ell, b_re, b_cancel):
             lay.addWidget(b)
         tb.adjustSize()
         return tb
@@ -182,11 +183,13 @@ class _CaptureOverlay(QWidget):
         self._toolbar.show()
         self._toolbar.raise_()
         self._toolbar.adjustSize()
+        # 贴在选区右下角外侧；屏幕放不下就贴进选区内侧
         x = r.x() + r.width() - self._toolbar.width()
-        y = r.y() + r.height() + 6
+        y = r.y() + r.height() + 1
         if y + self._toolbar.height() > self.height():
-            y = max(0, r.y() - self._toolbar.height() - 6)
+            y = r.y() + r.height() - self._toolbar.height() - 1
         x = max(0, min(x, self.width() - self._toolbar.width()))
+        y = max(0, min(y, self.height() - self._toolbar.height()))
         self._toolbar.move(x, y)
 
     # ---------- 事件（全部用子类事件，不用 eventFilter） ----------
@@ -291,13 +294,17 @@ class _CaptureOverlay(QWidget):
         if dragging:
             tip = '%d × %d  松开鼠标完成选择' % (r.width(), r.height())
         else:
-            tip = ('%d × %d  双击或点「确认截图」完成，'
-                   '点其他位置重新框选' % (r.width(), r.height()))
-        p.fillRect(QRect(r.x(), max(0, r.y() - 22), r.width(), 20),
-                   QColor('#2f7de0'))
-        p.setPen(QPen(QColor('#ffffff')))
-        p.drawText(QRect(r.x(), max(0, r.y() - 22), r.width(), 20),
-                   Qt.AlignCenter, tip)
+            tip = ('%d × %d  双击点击 [确认截图] 完成，点其他位置重新框选'
+                   % (r.width(), r.height()))
+        # 信息条贴着选区上沿（上方放不下就画在选区内部顶端，不再飘走）
+        bar_h = 20
+        by = r.y() - bar_h if r.y() - bar_h >= 0 else r.y()
+        bar = QRect(r.x(), by, max(r.width(), 120), bar_h)
+        p.fillRect(bar, QColor('#2f7de0'))
+        p.setPen(QColor('#ffffff'))
+        fm = p.fontMetrics()
+        p.drawText(bar.adjusted(5, 0, -5, 0), Qt.AlignVCenter | Qt.AlignLeft,
+                   fm.elidedText(tip, Qt.ElideRight, bar.width() - 10))
 
 
 def capture_region():
