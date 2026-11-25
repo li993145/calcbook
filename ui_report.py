@@ -699,7 +699,7 @@ class ReportViewerDialog(QDialog):
                     if r.value is not None else '')
                 cells = [r.code or '', r.name or '', r.unit or '', val,
                          r.formula or '', _row_field(r, 'drawing_no'),
-                         r.remark or '']
+                         _row_field(r, 'remark')]
                 rows_html.append('<tr>' + ''.join(
                     '<td>%s</td>' % _html.escape(str(c)) for c in cells) + '</tr>')
             # 小计只算本分部自己的行（与打印出来的计算书一致，不含下级，
@@ -900,7 +900,7 @@ class ReportViewerDialog(QDialog):
                 if r.value is not None else '')
             sub = QTreeWidgetItem([r.code or '', r.name or '', r.unit or '', val,
                                    r.formula or '', _row_field(r, 'drawing_no'),
-                                   r.remark or ''])
+                                   _row_field(r, 'remark')])
             for c in range(self.tree.columnCount()):
                 sub.setForeground(c, QBrush(QColor('#333333')))
             item.addChild(sub)
