@@ -59,6 +59,30 @@ _DMS = re.compile(r'(\d+(?:\.\d+)?)\s*°\s*(\d+(?:\.\d+)?)\s*[′\']\s*(\d+(?:\.
 # 钢筋级别罗马数字（ⅠⅡⅢⅣ）与直径/半径标记，公式中一律当注释忽略
 _GRADE_CHARS = 'ⅠⅡⅢⅣⅤ'
 
+# ------------------------- 单元格引用（V3.9） -------------------------
+# 单元格地址 = 列字母 + 行号，如 A2、B12、AA3。
+# 边界取得很严：前后不能紧贴字母 / 数字 / 下划线 / 汉字，
+# 否则 C30混凝土、M10砂浆、HRB400 这类规格串会被误当成单元格引用。
+CELL_REF_RE = re.compile(
+    r'(?<![0-9A-Za-z_\u4e00-\u9fff])'
+    r'([A-Za-z]{1,2})(\d{1,7})'
+    r'(?![0-9A-Za-z_\u4e00-\u9fff])')
+
+
+def find_cell_refs(text, valid=None):
+    """找出文本里的单元格引用。
+
+    valid 为合法地址集合（如 {'A1','A2','B1'}）；None 表示不校验。
+    返回 [(起点, 终点, 地址), …]，地址统一大写。
+    """
+    out = []
+    for m in CELL_REF_RE.finditer(str(text or '')):
+        addr = m.group(1).upper() + m.group(2)
+        if valid is not None and addr not in valid:
+            continue
+        out.append((m.start(), m.end(), addr))
+    return out
+
 
 # ------------------------- 开根号 √ → sqrt() -------------------------
 def _sqrt_operand_end(s, i):
@@ -313,27 +337,63 @@ class FormulaEngine:
     def __init__(self, constants=None):
         self.constants = dict(constants or {})  # {'@层高': 3.6}
         self.functions = dict(FUNCTIONS)
+        # V3.9：合法的单元格地址集合（列字母 + 行号）。
+        # None = 旧版模式：只把 A<行号> 当作引用（V3.7.9 行为）。
+        self.ref_addrs = None
+        self.ref_cols = set()
 
     def set_constants(self, constants):
         self.constants = dict(constants or {})
+
+    def set_refs(self, addrs=None, cols=None):
+        """设置本轮可用的单元格地址（Project.recalc 每个分部调一次）。
+
+        addrs 为 None 时退回旧版模式（只认 A<行号>）。
+        """
+        self.ref_addrs = set(addrs) if addrs is not None else None
+        self.ref_cols = set(cols or ())
 
     def clean(self, expr: str) -> str:
         """返回清理后可直接求值的表达式（用于展示与调试）。"""
         self._missing = []      # 公式里引用、但常量表里没有的名字
         s = to_halfwidth(str(expr))
-        # V3.7.9：单元格引用。SUM(A1:A10) 先展开成 A1+A2+…+A10；
-        # A12 这类引用换成 \x01行号\x01 占位符（不含字母数字相邻，
-        # 不会被后面的钢筋规格剥离、隐式乘号规则破坏），最后再还原成 A行号。
-        # 求值时 A行号 由 context 提供（见 Project.recalc，两遍求值）。
+        # V3.9：允许像 Excel 那样以 = 开头（=4*5、＝4×5 都行）
+        if s.startswith('='):
+            s = s[1:].lstrip()
+        # V3.7.9 / V3.9：单元格引用。
+        #   SUM(A1:A10) 先展开成 A1+A2+…+A10（同一列区间）；
+        #   合法引用（列字母 + 行号）先换成 \x01序号\x01 占位符，
+        #   避免后面的钢筋规格剥离、注释剥离把它破坏；
+        #   隐式乘号规则跑之前再还原成地址文本，数值由 context 提供。
+        #   ref_addrs 为 None 时是旧版模式：只把 A<行号> 当作引用（V3.7.9 行为）。
+        refs = []          # 占位符序号 -> 地址文本
+
         def _expand_sum(m):
-            a, b = int(m.group(1)), int(m.group(2))
+            c1, r1 = m.group(1).upper(), int(m.group(2))
+            c2, r2 = m.group(3).upper(), int(m.group(4))
+            if c1 != c2:
+                return m.group(0)          # 跨列区间暂不支持，原样保留
+            a, b = r1, r2
             if a > b:
                 a, b = b, a
             b = min(b, a + 1999)
-            return '(' + '+'.join('A%d' % i for i in range(a, b + 1)) + ')'
-        s = re.sub(r'(?i)\bSUM\s*\(\s*[Aa](\d+)\s*:\s*[Aa](\d+)\s*\)',
-                   _expand_sum, s)
-        s = re.sub(r'\b[Aa](\d{1,7})\b', lambda m: '\x01%s\x01' % m.group(1), s)
+            return '(' + '+'.join('%s%d' % (c1, i) for i in range(a, b + 1)) + ')'
+
+        s = re.sub(r'(?i)\bSUM\s*\(\s*([A-Za-z]{1,2})(\d{1,7})\s*:\s*'
+                   r'([A-Za-z]{1,2})(\d{1,7})\s*\)', _expand_sum, s)
+
+        def _hold_ref(m):
+            letter, num = m.group(1).upper(), m.group(2)
+            addr = letter + num
+            if self.ref_addrs is None:
+                if letter != 'A':
+                    return m.group(0)      # 旧版模式只认 A<行号>
+            elif addr not in self.ref_addrs:
+                return m.group(0)          # 不存在的地址原样保留 → 报「未定义的名称」
+            refs.append(addr)
+            return '\x01%d\x01' % (len(refs) - 1)
+
+        s = CELL_REF_RE.sub(_hold_ref, s)
         # V3.6.1：TssdEng 字体的标准钢筋等级符号（私用区 U+E000 等）统一按 Φ 处理，
         # 这样「<三级钢符号>8@200 4×5」这类规格说明照常被剥离，不参与计算。
         s = re.sub('[\ue000-\ue00e\ue530-\ue53d]', 'Φ', s)
@@ -397,6 +457,10 @@ class FormulaEngine:
         s = _CONST_TOKEN.sub(restore, s)
         # 开根号 √ → sqrt()：√9、√(3+4)、2√9、√9×4 均可直接算
         s = convert_sqrt(s)
+        # 还原单元格引用占位符 → 地址文本（数值由 context 提供）
+        # 必须放在隐式乘号规则之前：2A12 这类写法要靠隐式乘号补上 "*"
+        if refs:
+            s = re.sub(r'\x01(\d+)\x01', lambda m: refs[int(m.group(1))], s)
         # 隐式乘法：)( → )*(  、数字( → 数字*(   、数字sqrt → 数字*sqrt
         # V3.7.3：数字前若是字母（函数名以数字结尾，如 frustum4(...)）不插乘号
         s = re.sub(r'\)\s*\(', ')*(', s)
@@ -404,8 +468,6 @@ class FormulaEngine:
         s = re.sub(r'(\d)(?=[A-Za-z_])', r'\1*', s)
         s = re.sub(r'\)(?=[A-Za-z_])', r')*', s)
         s = re.sub(r'\s+', '', s)
-        # 还原单元格引用占位符 → A行号（Evaluator 从 context 里取值）
-        s = re.sub(r'\x01(\d+)\x01', lambda m: 'A' + m.group(1), s)
         return s
 
     def evaluate(self, expr, context=None, xj_callback=None):
@@ -422,9 +484,9 @@ class FormulaEngine:
                 names = '、'.join(dict.fromkeys(self._missing))
                 return None, cleaned, f"未定义的常量：{names}（在左下常量框里新增即可）"
             tree = ast.parse(cleaned, mode='eval')
-            # 合并常量：先引擎常量，再上下文覆盖
-            variables = {}
-            variables.update(context)
+            # 上下文直接交给求值器（大表反复求值时省掉一次整体复制；
+            # 求值是同步的，期间调用方不会改动这个 dict）
+            variables = context
             ev = Evaluator(variables, xj_callback, self.functions)
             val = ev.visit(tree)
             if isinstance(val, bool):

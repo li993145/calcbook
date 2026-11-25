@@ -6,6 +6,7 @@ from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
 from openpyxl.utils import get_column_letter
 
 from .units import precision_for_unit, section_precision
+from .model import cell_display_text
 
 # 纸张名称 → openpyxl 的 paperSize 常量名
 PAPERSIZE_MAP = {
@@ -122,10 +123,17 @@ def export_xlsx(project, path, precision=3, report=None):
                     vals.append('是' if row.no_count else '')
                 elif key == 'value':
                     vals.append(row.value)
-                elif hasattr(row, key):
-                    vals.append(getattr(row, key))
+                elif key == 'img':
+                    vals.append('')
                 else:
-                    vals.append(row.custom.get(key, ''))
+                    # V3.9：备注列 / 自定义列里写了公式 → 导出算出来的数值
+                    cc = (getattr(row, 'cell_calc', None) or {}).get(key)
+                    if cc and cc.get('value') is not None:
+                        vals.append(cc['value'])       # 数值型，WPS 里还能继续参与计算
+                    else:
+                        vals.append(cell_display_text(
+                            row, key, precision_for_unit(getattr(row, 'unit', ''),
+                                                        precision)))
             for j, v in enumerate(vals, 1):
                 c = ws.cell(r, j, v)
                 c.font = Font(name='微软雅黑', size=9)

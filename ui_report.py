@@ -102,7 +102,20 @@ def localize_print_preview(dlg):
 
 
 def _row_field(row, key):
-    """取行上某个字段的文本（内置字段在属性上，自定义列在 custom 里）。"""
+    """取行上某个字段的文本（内置字段在属性上，自定义列在 custom 里）。
+
+    V3.9：备注列 / 自定义列里写了公式时，返回算出来的数值。
+    """
+    if key == 'img':
+        return ''
+    if key == 'value':
+        return fmt_num(getattr(row, 'value', None),
+                       precision_for_unit(getattr(row, 'unit', ''), 3))
+    calc = (getattr(row, 'cell_calc', None) or {}).get(key)
+    if calc:
+        v = calc.get('value')
+        if v is not None:
+            return fmt_num(v, precision_for_unit(getattr(row, 'unit', ''), 3))
     if hasattr(row, key):
         return getattr(row, key) or ''
     return (getattr(row, 'custom', {}) or {}).get(key, '') or ''

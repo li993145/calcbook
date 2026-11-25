@@ -24,7 +24,9 @@ from PyQt5.QtGui import (QFont, QFontMetrics, QFontDatabase, QColor, QKeySequenc
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
-from core.model import Project, Section, Row, DEFAULT_LEVELS, new_id
+from core.model import (Project, Section, Row, DEFAULT_LEVELS, new_id,
+                        column_letters, cell_display_text, cell_source_text,
+                        cell_formula_text)
 from core.exporter import export_xlsx
 from core.units import (UNIT_LIST, UNIT_GROUPS, INTEGER_UNITS, REBAR_CONSTANTS,
                         precision_for_unit, section_precision, fmt_const, fmt_num)
@@ -41,7 +43,7 @@ from ui_drawing import (encode_img, decode_img, capture_region, img_size,
 APP_NAME = "工程量计算书"
 # 本表内部复制/剪切的结构化剪贴板格式（多行整行复制 → 粘到任意位置插入行，不覆盖已有数据）
 CB_ROWS_MIME = 'application/x-calcbook-rows'
-APP_VER = "3.8"
+APP_VER = "3.9"
 FILE_EXT = '.gcls'          # 工程文件后缀（内容仍是 JSON，便于排查与迁移）
 # V3.7.3：表格最大行列数与 WPS 表格一致（1048576 行 × 16384 列）
 MAX_ROWS = 1048576
@@ -862,7 +864,8 @@ class LiveSyncDelegate(QStyledItemDelegate):
         editor = super().createEditor(parent, option, index)
         if isinstance(editor, QLineEdit) and isinstance(al, int) and al:
             editor.setAlignment(Qt.Alignment(al))
-        if isinstance(editor, QLineEdit) and key == 'formula':
+        if isinstance(editor, QLineEdit) and self.win._col_is_formula_cell(key):
+            # V3.9：计算公式列之外的列（备注 / 自定义列）同样实时同步到辅助框
             self.win._cell_editor = editor
             editor.textChanged.connect(self.win.on_cell_editor_text)
             editor.destroyed.connect(self.win._on_editor_destroyed)
@@ -884,6 +887,20 @@ class LiveSyncDelegate(QStyledItemDelegate):
             # 不做 selectAll：全选状态下点击弹窗选项在部分 Qt/样式组合下会失效，
             # 让行编辑保持普通光标即可，弹窗点选与手动输入都正常。
             return
+        # V3.9：备注列 / 自定义列里写了公式时，格子里显示的是算出来的数值，
+        # 但双击编辑要看到原公式（QTableWidgetItem 的 EditRole 始终跟随
+        # DisplayRole，无法单独存原文，所以由这里从模型取）。
+        try:
+            key = self.win.col_key(index.column())
+            if key not in ('formula', 'value') and self.win._col_is_formula_cell(key):
+                rows = self.win.current_section.rows
+                if 0 <= index.row() < len(rows):
+                    src = cell_source_text(rows[index.row()], key)
+                    if src:
+                        editor.setText(src)
+                        return
+        except Exception:
+            pass
         super().setEditorData(editor, index)
 
     def setModelData(self, editor, model, index):
@@ -3093,6 +3110,7 @@ class MainWindow(QMainWindow):
         self._loading = False
         self._auto_sizing = False   # 程序自动改列宽时不切换到手动模式
         self._formula_row = None   # 辅助框当前关联的行索引
+        self._formula_col = None   # V3.9：辅助框当前关联的列（工程量列固定 A，其余 B、C…）
         self._print_area = None    # 选定打印区域：{'section', 'rows', 'keys'}
         self._syncing = False      # 双向同步防循环标志
         self._cell_editor = None   # 当前正在编辑的表格单元格编辑器
@@ -3944,12 +3962,12 @@ class MainWindow(QMainWindow):
         fh = QHBoxLayout()
         fh.setContentsMargins(2, 3, 2, 2)
         fh.setSpacing(4)
-        lb_formula = QLabel('公式辅助输入（仅公式列）：')
+        lb_formula = QLabel('公式辅助输入（计算公式 / 备注 / 自定义列）：')
         lb_formula.setAlignment(Qt.AlignLeft | Qt.AlignTop)
         lb_formula.setContentsMargins(0, 4, 0, 0)
         fh.addWidget(lb_formula)
         self.formula_help = FormulaEdit(self.apply_formula_help)
-        self.formula_help.setPlaceholderText('选中"计算公式"列的单元格，这里会同步显示并着色；也可直接在此输入')
+        self.formula_help.setPlaceholderText('选中「计算公式」「备注」或自定义列的单元格，这里会同步显示并着色；也可直接在此输入')
         self.formula_help.setStyleSheet('background:#f7f7f7; color:#888;')
         self.formula_help.setMaximumHeight(64)
         self.formula_help.setReadOnly(True)
@@ -4639,6 +4657,7 @@ class MainWindow(QMainWindow):
         <li><b>括号快捷键</b>：F4 公式前插入 <code>()</code>、F5 插入点插入 <code>()</code>、F6 插入点插入 <code>[]</code>、F7 末尾追加 <code>[]</code>；在单元格里直接打字时也生效。</li>
         <li><b>特殊写法</b>：度分秒如 34°56′30″ 可直接计算；<code>√9=3</code>、<code>√(3+4)</code>、<code>2×√9</code> 均可；写在公式开头的钢筋规格（如 <code>Φ8@200 4×5</code>=20）不参与计算，旧写法 Φ² / Φ³ / Φ⁴ 仍兼容。<b>钢筋等级符号</b>请点「特殊符号」：面板里用 <b>TssdEng（探索者）字体的国标制图符号</b>（一级 HPB300 / 二级 HRB335 / 三级 HRB400 / 四级 HRB500），点击即插入公式；这些符号需 TssdEng 字体显示（软件已随包附带），本机没有该字体时该组会自动隐藏。</li>
         <li><b>单元格引用与合计行（V3.7.9）</b>：公式里可以用 <code>A行号</code> 引用<b>本分部</b>内其他行的工程量——如 <code>A12*0.35</code>（第 12 行工程量×0.35）、<code>SUM(A1:A10)</code>（第 1～10 行求和）；引用上下的行都能算对。右键菜单<b>「插入合计行」</b>在本分部末尾加一行合计，工程量自动汇总自上一个合计行以来的普通行（合计行加粗、不可手改、不参与上级汇总和报表分类汇总，不会重复计数）。引用只在本分部内有效；删行改行后重算会自动更新。</li>
+        <li><b>任意单元格之间运算（V3.9）</b>：公式里可以写<b>列字母 + 行号</b>的二维地址，<b>跨列、跨行随便算</b>——如 <code>A2*B3</code>（第 2 行工程量 × 第 3 行「计算公式」列的值）、<code>A1*A2*0.35</code>、<code>SUM(B1:B10)</code>。<b>列字母标在表头上</b>（默认：工程量=A、计算公式=B、备注=C，自定义列依次 D、E…；序号 / 清单编号 / 项目名称 / 计量单位 / 图纸 / 不计 是标识列，不参与引用），行号是<b>本分部内</b>的行号，鼠标悬停表头或选中单元格可在状态栏看到地址。<b>公式也不只写在「计算公式」列</b>：<b>备注列和自定义列同样能写公式</b>（以 <code>=</code> 开头，或内容里带单元格地址），算出来的结果会显示在格子里（鼠标悬停可看原公式），并能再被别的格引用；底部的<b>公式辅助输入框</b>也跟着联动，选中备注列或自定义列就能直接在那里写。工程量列是结果列，不能直接写公式。</li>
         <li><b>汇总与配色</b>：每个分部自动「小计」（XJ 子分部汇总函数已取消，旧工程中的 XJ() 公式仍可正常计算）。公式列与辅助框用同一套配色：数字红、运算符黑、<code>[备注]</code>深绿、汉字淡绿、@常量紫、上标蓝，便于核对。</li>
         </ul>
 
@@ -4779,16 +4798,39 @@ class MainWindow(QMainWindow):
         return precision_for_unit(getattr(row, 'unit', ''), self.precision)
 
     def cell_text_for(self, row, key):
-        """按列 key 取单元格显示文本。"""
-        if key == 'no_count':
+        """按列 key 取单元格显示文本。
+
+        V3.9：备注列 / 自定义列里写了公式时，这里显示算出来的数值
+        （与报表预览、Excel 导出同一口径）。
+        """
+        return cell_display_text(row, key, self.row_precision(row))
+
+    # ---------------- V3.9：单元格地址（列字母 + 行号） ----------------
+
+    def calc_letters(self):
+        """列 key → 单元格地址字母（工程量列固定 A，其余可计算列依次 B、C…）。"""
+        return column_letters(self.project.columns)
+
+    def calc_keys(self):
+        """能写公式、也能被引用的列 key 集合。"""
+        return set(k for k, v in self.calc_letters().items() if v)
+
+    def _col_is_formula_cell(self, key):
+        """该列能否写公式（V3.9：除「工程量」结果列外的可计算列都可以）。"""
+        if not key or key in ('value', 'no_count', 'img'):
+            return False
+        return key in self.calc_keys()
+
+    def cell_address(self, row_i, col_i):
+        """单元格地址（如 A2）；不是可计算列或行越界时返回空串。"""
+        try:
+            key = self.col_key(col_i)
+            letter = self.calc_letters().get(key, '')
+            if not letter or row_i < 0:
+                return ''
+            return '%s%d' % (letter, row_i + 1)
+        except Exception:
             return ''
-        if key == 'img':
-            return ''                    # V3.7.5 图纸列画缩略图，无文本
-        if key == 'value':
-            return fmt_num(row.value, self.row_precision(row))
-        if hasattr(row, key):
-            return str(getattr(row, key))
-        return str(row.custom.get(key, ''))
 
     def row_fill_for(self, row_obj, col_def):
         """单元格实际底色：单元格 > 整行 > 整列（空串表示无填充）。"""
@@ -4807,12 +4849,25 @@ class MainWindow(QMainWindow):
         cols = self.project.columns
         self.table.setColumnCount(len(cols))
         # V3.7.9：表头显示「分部级列名覆盖」——明细表可单独给列起名
-        self.table.setHorizontalHeaderLabels([self._col_display_title(c) for c in cols])
+        # V3.9：表头加上单元格地址的列字母（A/B/C…），公式里就按这个引用
+        letters = self.calc_letters()
+        head_labels = []
+        for c in cols:
+            t = self._col_display_title(c)
+            letter = letters.get(c['key'], '')
+            head_labels.append(('%s %s' % (letter, t)) if letter else t)
+        self.table.setHorizontalHeaderLabels(head_labels)
         for j, cd in enumerate(cols):
             hi = self.table.horizontalHeaderItem(j)
             if hi is not None and cd['key'] == 'unit':
                 hi.setToolTip('双击（或选中后再点一下）弹出常用单位下拉框，可直接选择\n'
                               'm/m2/m3/kg 保留2位、t 保留3位、个/块/套/处/台/组 取整')
+            # V3.9：表头提示本列的单元格地址（公式里按这个地址引用）
+            letter = letters.get(cd['key'], '')
+            if hi is not None and letter:
+                hi.setToolTip('本列单元格地址：%s1、%s2 …（行号为本分部内的行号）\n'
+                              '公式里可直接引用其它单元格，例如 %s2*%s3'
+                              % (letter, letter, letter, letter))
         # 应用列宽（默认比例）。setSectionsMovable 下按逻辑索引设置宽度
         hh = self.table.horizontalHeader()
         for j, cd in enumerate(cols):
@@ -4860,6 +4915,17 @@ class MainWindow(QMainWindow):
                             tip = self._ref_code_tip(row, sec)
                             if tip:
                                 it.setToolTip(tip)
+                        # V3.9：备注列 / 自定义列里的公式出错 → 标红
+                        cerr = ((getattr(row, 'cell_calc', None) or {}).get(key)
+                                or {}).get('error')
+                        if cerr and key not in ('formula', 'value'):
+                            it.setForeground(QColor('C00000'))
+                            it.setToolTip(cerr)
+                        elif key in letters and key not in ('value', 'formula'):
+                            # 算出来的格：提示里给出原公式，方便核对
+                            src = cell_source_text(row, key)
+                            if src and src != val:
+                                it.setToolTip('公式：%s' % src)
                     bg = self.row_fill_for(row, cd)
                     if bg:
                         it.setBackground(QBrush(QColor(bg)))
@@ -4990,14 +5056,15 @@ class MainWindow(QMainWindow):
         # 表格里改公式时，同步辅助框（着色显示）
         if key == 'formula':
             self._formula_row = row_i
+            self._formula_col = col
             if self.formula_help.isReadOnly():
                 self.formula_help.setReadOnly(False)
                 self.formula_help.setStyleSheet('background:#ffffff;')
             self.formula_help.setTextSilent(text)
-        # 表格里改备注时直接写在“备注”列，不再同步右侧面板
-        if key in ('formula', 'no_count'):
+        # V3.9：备注列 / 自定义列里写公式（以 = 开头或含单元格引用）同样参与重算
+        if key in ('formula', 'no_count') or self._col_is_formula_cell(key):
             self.project.recalc()
-            # 只刷新工程量列与小计，不整表重建，避免打断正在进行的单元格输入
+            # 只刷新工程量列与公式格的计算结果，不整表重建，避免打断正在进行的单元格输入
             self._update_value_cells()
             self._dirty = True
         elif key == 'unit':
@@ -5019,12 +5086,11 @@ class MainWindow(QMainWindow):
         key = self.col_key(col)
         if key == 'no_count':
             row.no_count = (text == '是')
-        elif key and hasattr(row, key) and key != 'value':
-            setattr(row, key, text)
-        elif key:
-            row.custom[key] = text
+        elif key and key != 'value':
+            self._set_cell_text(row_i, key, text)
         if key == 'formula':
             self._formula_row = row_i
+            self._formula_col = col
             self.formula_help.setTextSilent(text)
         self.project.recalc()
         self.refresh_table()
@@ -5215,28 +5281,48 @@ class MainWindow(QMainWindow):
     # ---------------- 选中联动 ----------------
 
     def on_cell_cursor(self, row, col, prev_row, prev_col):
-        """选中单元格：公式列联动辅助框，双向同步；行 / 列高亮随光标重绘。"""
+        """选中单元格：可写公式的列联动辅助框，双向同步；行 / 列高亮随光标重绘。"""
         if self._loading:
             return
         # 行 / 列高亮需要跟着当前单元格重绘（委托在 paint 时读取 currentIndex）
         if getattr(self, '_hilite_row', False) or getattr(self, '_hilite_col', False):
             self.table.viewport().update()
-        is_formula_col = (self.col_key(col) == 'formula')
-        if is_formula_col and 0 <= row < len(self.current_section.rows):
-            text = self.current_section.rows[row].formula
+        key = self.col_key(col)
+        # V3.9：备注列 / 自定义列也能写公式，辅助框跟着联动
+        if self._col_is_formula_cell(key) and 0 <= row < len(self.current_section.rows):
+            text = cell_source_text(self.current_section.rows[row], key)
             self._formula_row = row
+            self._formula_col = col
             self.formula_help.setReadOnly(False)
             self.formula_help.setStyleSheet('background:#ffffff;')
             self.formula_help.setTextSilent(text)
         else:
             self.formula_help.setReadOnly(True)
             self.formula_help.setStyleSheet('background:#f7f7f7; color:#888;')
-            self.formula_help.setPlaceholderText('请选中"计算公式"列的单元格，公式将在此同步显示并着色')
+            self.formula_help.setPlaceholderText('请选中「计算公式」「备注」或自定义列的单元格，公式将在此同步显示并着色')
             self.formula_help.setTextSilent('')
             self._formula_row = None
+            self._formula_col = None
+        # V3.9：状态栏显示当前单元格的地址（列字母 + 行号）
+        self._show_cell_address(row, col)
         # V3.7.5：右侧图纸预览跟随选中行
         try:
             self._update_img_preview()
+        except Exception:
+            pass
+
+    def _show_cell_address(self, row, col):
+        """状态栏提示当前单元格的地址（公式里按这个地址引用）。"""
+        try:
+            addr = self.cell_address(row, col)
+            if not addr:
+                return
+            key = self.col_key(col)
+            title = self._col_display_title(
+                self.project.columns[col]) if 0 <= col < len(self.project.columns) else key
+            self.lbl_status.setToolTip('当前单元格地址：%s（%s 列，第 %d 行）\n'
+                                       '公式里可直接引用，例如 %s*%s'
+                                       % (addr, title, row + 1, addr, addr))
         except Exception:
             pass
 
@@ -5250,12 +5336,16 @@ class MainWindow(QMainWindow):
         self.commit_edit()
 
     def on_cell_editor_text(self, text):
-        """表格公式单元格【正在编辑】→ 逐字实时同步到辅助框、模型与工程量。"""
+        """表格单元格【正在编辑】→ 逐字实时同步到辅助框、模型与工程量。
+
+        V3.9：计算公式列之外的列（备注 / 自定义列）同样实时同步。
+        """
         if self._loading or self._syncing:
             return
         row = self.table.currentRow()
         col = self.table.currentColumn()
-        if col < 0 or self.col_key(col) != 'formula':
+        key = self.col_key(col) if col >= 0 else ''
+        if col < 0 or not self._col_is_formula_cell(key):
             return
         if row < 0 or row >= len(self.current_section.rows):
             return
@@ -5263,46 +5353,57 @@ class MainWindow(QMainWindow):
         try:
             self.begin_edit('改公式')
             self._formula_row = row
+            self._formula_col = col
             # 辅助框保持可编辑，并显示同样的内容（着色）
             if self.formula_help.isReadOnly():
                 self.formula_help.setReadOnly(False)
                 self.formula_help.setStyleSheet('background:#ffffff;')
             if self.formula_help.toPlainText() != text:
                 self.formula_help.setTextSilent(text)
-            self.current_section.rows[row].formula = text
+            self._set_cell_text(row, key, text)
             self.project.recalc()
             self._update_value_cells()
             self._dirty = True
         finally:
             self._syncing = False
 
+    def _set_cell_text(self, row_i, key, text):
+        """把文本写进指定行的指定列（公式列走 formula 属性，自定义列走 custom）。"""
+        row = self.current_section.rows[row_i]
+        if key == 'formula':
+            row.formula = text
+        elif hasattr(row, key):
+            setattr(row, key, text)
+        else:
+            row.custom[key] = text
+
     def on_formula_help_text(self, text):
-        """辅助框内输入 → 实时写回表格公式单元格（及正在编辑的编辑器）并着色。"""
+        """辅助框内输入 → 实时写回当前绑定的单元格（及正在编辑的编辑器）并着色。"""
         if self._loading or self._syncing or self.formula_help.isReadOnly():
             return
         row = self._formula_row
-        if row is None or row < 0 or row >= len(self.current_section.rows):
-            # 若当前选中的是公式列，用当前行
+        col = self._formula_col
+        if row is None or col is None or row < 0 or row >= len(self.current_section.rows):
+            # 若当前选中的是可写公式的列，用当前行
             cur = self.table.currentRow()
             c = self.table.currentColumn()
-            if c >= 0 and self.col_key(c) == 'formula' and 0 <= cur < len(self.current_section.rows):
-                row = cur
-                self._formula_row = row
+            if c >= 0 and self._col_is_formula_cell(self.col_key(c)) \
+                    and 0 <= cur < len(self.current_section.rows):
+                row, col = cur, c
+                self._formula_row, self._formula_col = row, col
             else:
                 return
+        key = self.col_key(col)
         self._syncing = True
         try:
             self.begin_edit('改公式')
-            self.current_section.rows[row].formula = text
+            self._set_cell_text(row, key, text)
             # 同步表格单元格文本（静默，避免触发 itemChanged 递归）
-            for c in range(self.table.columnCount()):
-                if self.col_key(c) == 'formula':
-                    it = self.table.item(row, c)
-                    if it is not None and it.text() != text:
-                        self._loading = True
-                        it.setText(text)
-                        self._loading = False
-                    break
+            it = self.table.item(row, col)
+            if it is not None and it.text() != text:
+                self._loading = True
+                it.setText(text)
+                self._loading = False
             # 若该单元格正处于编辑状态，编辑器内容也要同步，
             # 否则结束编辑时旧内容会覆盖辅助框，破坏双向同步。
             ed = self._cell_editor
@@ -5315,47 +5416,65 @@ class MainWindow(QMainWindow):
                 except RuntimeError:
                     self._cell_editor = None
             self.project.recalc()
-            # 只更新工程量列显示，避免整表刷新打断输入
+            # 只更新计算结果，避免整表刷新打断输入
             self._update_value_cells()
             self._dirty = True
         finally:
             self._syncing = False
 
     def _update_value_cells(self):
-        """只刷新工程量列与小计状态，不重建整个表格。"""
+        """只刷新工程量列与公式格的计算结果，不重建整个表格。"""
+        calc = self.calc_keys()
         for r in range(len(self.current_section.rows)):
+            row_obj = self.current_section.rows[r]
+            prec = self.row_precision(row_obj)
             for c in range(self.table.columnCount()):
-                if self.col_key(c) == 'value':
+                key = self.col_key(c)
+                if key == 'value':
                     it = self.table.item(r, c)
                     if it is not None:
-                        row_obj = self.current_section.rows[r]
                         self._loading = True
-                        it.setText(fmt_num(row_obj.value, self.row_precision(row_obj)))
+                        it.setText(fmt_num(row_obj.value, prec))
                         it.setForeground(QColor('C00000') if row_obj.error else QColor('000000'))
                         self._loading = False
-                    break
+                    continue
+                if key not in calc:
+                    continue
+                # V3.9：备注列 / 自定义列里写了公式 → 刷新成算出来的数值
+                cc = (getattr(row_obj, 'cell_calc', None) or {}).get(key)
+                if not cc:
+                    continue
+                it = self.table.item(r, c)
+                if it is None:
+                    continue
+                self._loading = True
+                if cc.get('value') is not None:
+                    it.setText(fmt_num(cc['value'], prec))
+                if cc.get('error'):
+                    it.setForeground(QColor('C00000'))
+                    it.setToolTip(cc['error'])
+                self._loading = False
         sec = self.current_section
         self.lbl_status.setText('%s：%d 行' % (sec.name, len(sec.rows)))
         self.update_selection_stats()
         self.schedule_summary_refresh()
 
     def apply_formula_help(self):
-        """把辅助框内容写入当前行的公式列（Ctrl+Enter / 写入按钮）。"""
+        """把辅助框内容写入当前绑定的单元格（Ctrl+Enter / 写入按钮）。"""
         if self.formula_help.isReadOnly():
             return
         row = self._formula_row
-        if row is None or row < 0 or row >= len(self.current_section.rows):
+        col = self._formula_col
+        if row is None or col is None or row < 0 or row >= len(self.current_section.rows):
             return
         text = self.formula_help.toPlainText()
-        self.current_section.rows[row].formula = text
-        for c in range(self.table.columnCount()):
-            if self.col_key(c) == 'formula':
-                it = self.table.item(row, c)
-                if it is not None and it.text() != text:
-                    self._loading = True
-                    it.setText(text)
-                    self._loading = False
-                break
+        key = self.col_key(col)
+        self._set_cell_text(row, key, text)
+        it = self.table.item(row, col)
+        if it is not None and it.text() != text:
+            self._loading = True
+            it.setText(text)
+            self._loading = False
         self.project.recalc()
         self._update_value_cells()
         self._dirty = True
@@ -8391,12 +8510,10 @@ class MainWindow(QMainWindow):
                 key = cd['key']
                 if key == 'no_count':
                     text = '是' if r.no_count else ''
-                elif key == 'value':
-                    text = fmt_num(r.value, precision_for_unit(r.unit, self.precision))
-                elif hasattr(r, key):
-                    text = str(getattr(r, key))
                 else:
-                    text = str(r.custom.get(key, ''))
+                    # V3.9：备注列 / 自定义列里写了公式 → 显示算出来的数值
+                    text = cell_display_text(
+                        r, key, precision_for_unit(r.unit, self.precision))
                 out.append(text)
             return out
 
@@ -8935,19 +9052,21 @@ class MainWindow(QMainWindow):
         self.table.setCurrentCell(row, col)
 
     def _ensure_formula_edit(self):
-        """返回可写的公式辅助框；只读时若当前是公式单元格则激活它。"""
+        """返回可写的公式辅助框；只读时若当前是可写公式的单元格则激活它。"""
         if not self.formula_help.isReadOnly():
             return self.formula_help
         row = self.table.currentRow()
         col = self.table.currentColumn()
-        if col < 0 or self.col_key(col) != 'formula':
+        if col < 0 or not self._col_is_formula_cell(self.col_key(col)):
             return None
         if row < 0 or row >= len(self.current_section.rows):
             return None
         self._formula_row = row
+        self._formula_col = col
         self.formula_help.setReadOnly(False)
         self.formula_help.setStyleSheet('background:#ffffff;')
-        self.formula_help.setTextSilent(self.current_section.rows[row].formula)
+        self.formula_help.setTextSilent(
+            cell_source_text(self.current_section.rows[row], self.col_key(col)))
         return self.formula_help
 
     def insert_bracket(self, mode):

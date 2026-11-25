@@ -2,8 +2,8 @@
 """数据模型：工程 -> 分部树 -> 数据行。JSON 可序列化。"""
 
 import json, os, re, uuid, datetime
-from .formula import FormulaEngine
-from .units import default_constants
+from .formula import FormulaEngine, find_cell_refs
+from .units import default_constants, fmt_num
 
 
 def new_id():
@@ -35,6 +35,110 @@ DEFAULT_COLUMNS = [
 LEGACY_DEFAULT_WIDTHS = {'code': 120, 'name': 200, 'part': 130,
                          'formula': 480, 'unit': 60, 'value': 100,
                          'remark': 160, 'no_count': 50}
+
+
+# ------------------------------------------------------------------
+# V3.9：单元格地址（列字母 + 行号）
+# ------------------------------------------------------------------
+# 不参与列字母分配的列：序号 / 清单编号 / 项目名称 / 计量单位 / 图纸 / 不计。
+# 这些列是标识与说明性的（清单编号常写成 A2-001 这类），参与引用容易误判；
+# 其余列（工程量、计算公式、备注与全部自定义列）都能写公式、也能被引用。
+NON_CALC_COLUMNS = {'seq', 'code', 'name', 'unit', 'img', 'no_count'}
+
+# 中文（含全角标点）——用于判断一个格子的文本是不是「普通文字」
+_CJK_RE = re.compile(r'[\u4e00-\u9fff\u3000-\u303f\uff00-\uffef]')
+
+
+def _col_letters(n):
+    """0 起序号 → Excel 式列字母（A, B, … Z, AA, AB …）。"""
+    out = []
+    for i in range(max(0, int(n))):
+        s = ''
+        k = i
+        while True:
+            s = chr(ord('A') + k % 26) + s
+            k = k // 26 - 1
+            if k < 0:
+                break
+        out.append(s)
+    return out
+
+
+def column_letters(columns):
+    """列 key → 单元格地址字母（V3.9）。
+
+    * 「工程量」列固定占用字母 A —— 兼容 V3.7.9 的 A<行号>（本分部第 N 行的工程量）；
+    * 其余可计算列（计算公式、备注、全部自定义列）按表格顺序依次取 B、C…
+    * 例：默认 9 列 → 工程量 A、计算公式 B、备注 C；再加一列自定义「单价」→ D
+    """
+    keys = [str(c.get('key', '')) for c in (columns or [])]
+    calc = [k for k in keys if k and k not in NON_CALC_COLUMNS]
+    letters = _col_letters(len(calc))
+    out = {}
+    for idx, k in enumerate(calc):
+        out[k] = letters[idx] if idx < len(letters) else ''
+    if 'value' in out and calc and calc[0] != 'value':
+        # 工程量列固定拿 A：原来占 A 的那一列改用工程量列原来的字母
+        v_idx = calc.index('value')
+        out[calc[0]] = letters[v_idx] if v_idx < len(letters) else ''
+        out['value'] = 'A'
+    return out
+
+
+def cell_formula_text(text, addrs=None):
+    """判断某个「非公式列」的单元格文本是否按公式计算。
+
+    返回 (是否公式, 公式文本)：
+    * 以 '=' 开头 → 明确是公式；
+    * 否则必须含「本表真实存在的单元格引用」且不含中文，才当公式
+      —— 这样清单编号、备注里的普通文字不会被误算。
+
+    addrs 为本分部合法的单元格地址集合。
+    """
+    s = str(text or '').strip()
+    if not s:
+        return False, ''
+    if s.startswith('='):
+        return True, s[1:].strip()
+    if _CJK_RE.search(s):
+        return False, ''
+    if not find_cell_refs(s, addrs):
+        return False, ''
+    return True, s
+
+
+def cell_source_text(row, key):
+    """单元格里的原始文本（公式格是公式本身，普通格是文字）。
+
+    内置列在 Row 属性上，自定义列在 Row.custom 里。
+    """
+    if hasattr(row, key):
+        return str(getattr(row, key) or '')
+    return str((getattr(row, 'custom', None) or {}).get(key, '') or '')
+
+
+def cell_display_text(row, key, precision=3, no_count_text=''):
+    """单元格的显示文本（统一口径：公式格显示计算结果）。
+
+    main.py 的表格、报表预览与 Excel 导出都用它，保证三处显示一致。
+    """
+    if key == 'no_count':
+        return no_count_text
+    if key == 'img':
+        return ''
+    if key == 'value':
+        return fmt_num(getattr(row, 'value', None), precision)
+    if key == 'formula':
+        return str(getattr(row, 'formula', '') or '')
+    # V3.9：备注列 / 自定义列里写了公式 → 显示算出来的结果
+    calc = (getattr(row, 'cell_calc', None) or {}).get(key)
+    if calc:
+        v = calc.get('value')
+        if v is not None:
+            return fmt_num(v, precision)
+    if hasattr(row, key):
+        return str(getattr(row, key) or '')
+    return str((getattr(row, 'custom', None) or {}).get(key, '') or '')
 
 
 def migrate_columns(cols):
@@ -179,6 +283,9 @@ class Row:
         self.no_count = no_count
         self.rate = rate
         self.custom = {}          # 自定义列值：{列key: 文本}
+        # V3.9：非公式列（备注 / 自定义列）里公式的计算结果
+        # {列key: {'value': 数值或 None, 'error': 错误信息或 None}}
+        self.cell_calc = {}
         self.fill = ''            # 整行填充色（#RRGGBB，空=无）
         self.cell_fill = {}       # 单元格填充色：{列key: #RRGGBB}
         self.cell_font = {}       # 单元格字体：{列key: {family,size,bold,italic,underline,strikeout,color}}
@@ -197,6 +304,7 @@ class Row:
                  no_count=self.no_count, rate=self.rate, value=self.value,
                  error=self.error, cleaned=self.cleaned, fill=self.fill)
         d['custom'] = self.custom
+        d['cell_calc'] = self.cell_calc
         d['cell_fill'] = self.cell_fill
         d['cell_font'] = self.cell_font
         d['cell_align'] = self.cell_align
@@ -212,6 +320,10 @@ class Row:
         for k, v in d.items():
             if hasattr(r, k):
                 setattr(r, k, v)
+        if not isinstance(r.cell_calc, dict):
+            r.cell_calc = {}
+        if not isinstance(r.custom, dict):
+            r.custom = {}
         return r
 
 
@@ -369,35 +481,59 @@ class Project:
         """重算所有行；XJ 汇总子节点有效工程量。
 
         V3.7.9：分部内支持单元格引用——公式里 A<行号> 表示本分部第 <行号> 行
-        的工程量（如 A12*0.35、SUM(A1:A10)）。求值分两遍：
-        第一遍引用未算出的行按 0 处理，第二遍用第一遍结果重算一遍，
-        这样引用上下行都能得到正确结果（隔行链式引用以第二遍为准）。
+        的工程量（如 A12*0.35、SUM(A1:A10)）。
+        V3.9：扩展为二维引用（列字母 + 行号，如 A2*B3）：
+            * 列字母按表格列顺序分配（工程量列固定 A，其余可计算列依次 B、C…）；
+            * 公式不再只写在「计算公式」列——备注列与自定义列都能写公式
+              （以 = 开头，或含本表真实存在的单元格引用），算出的结果可以
+              被别的格引用，表格里显示的是算出来的数值；
+            * 求值改为迭代（多遍直到收敛），上下行、跨列互相引用都能取到值。
         合计行（Row.total_row）不进公式引擎，直接汇总本分部内
         自上一个合计行以来的普通行。
         """
         self.engine.set_constants(self.constants)
+        letters = column_letters(self.columns)
+        calc_keys = [k for k in letters if letters[k]]
+        # 除工程量列（结果列）外，其余可计算列都能自己写公式
+        other_keys = [k for k in calc_keys if k not in ('value', 'formula')]
+        f_letter = letters.get('formula', '')
+        v_letter = letters.get('value', '')
+
         # 后序遍历：先子节点后父节点，保证 XJ 能取到子分部结果
         def walk(sec):
             for c in sec.children:
                 walk(c)
             rows = sec.rows
             n = len(rows)
-            base = {}                       # 第一遍结果：{'A1': 值, ...}
-            for pass_i in (0, 1):
-                # 单元格引用初值：第一遍全 0，第二遍用第一遍结果
-                ctx = dict(base) if pass_i else {}
+            if not n:
+                return
+            # 本分部合法的单元格地址（列字母 × 行号）
+            addrs = set()
+            for k in calc_keys:
+                L = letters[k]
                 for i in range(1, n + 1):
-                    ctx.setdefault('A%d' % i, 0.0)
+                    addrs.add('%s%d' % (L, i))
+            self.engine.set_refs(addrs, set(letters[k] for k in calc_keys))
+            # 地址 → 数值（初值 0；求值时按行推进）
+            values = dict((a, 0.0) for a in addrs)
+
+            def xj(args):
+                # XJ() 汇总当前分部下所有后代分部的工程量
+                total = 0.0
+                for c in sec.children:
+                    for descendant in c.iter_self_and_desc():
+                        if descendant.total() is not None:
+                            total += descendant.total()
+                return total
+
+            # 迭代求解：每遍按行顺序重算，值不再变化即收敛
+            max_pass = min(max(4, n + 2), 40)
+            for _pass in range(max_pass):
+                before = dict(values)
                 for idx, row in enumerate(rows):
-                    key = 'A%d' % (idx + 1)
-                    def xj(args):
-                        # XJ() 汇总当前分部下所有后代分部的工程量
-                        total = 0.0
-                        for c in sec.children:
-                            for descendant in c.iter_self_and_desc():
-                                if descendant.total() is not None:
-                                    total += descendant.total()
-                        return total
+                    rno = idx + 1
+                    addr_v = ('%s%d' % (v_letter, rno)) if v_letter else None
+                    addr_f = ('%s%d' % (f_letter, rno)) if f_letter else None
                     if getattr(row, 'total_row', False):
                         # 合计行：汇总自上一个合计行以来的普通行（跳过不计行）
                         start = 0
@@ -410,21 +546,45 @@ class Project:
                                   and rows[j].value is not None
                                   and not getattr(rows[j], 'total_row', False))
                         row.value, row.cleaned, row.error = tot, '合计', None
-                        ctx[key] = tot
-                        if not pass_i:
-                            base[key] = tot
+                        if addr_v:
+                            values[addr_v] = tot
+                        if addr_f:
+                            values[addr_f] = tot
                         continue
                     if row.no_count:
                         row.value, row.cleaned, row.error = None, row.formula, None
-                        ctx[key] = 0.0
+                        if addr_v:
+                            values[addr_v] = 0.0
+                        if addr_f:
+                            values[addr_f] = 0.0
+                        for k in other_keys:
+                            row.cell_calc.pop(k, None)
                         continue
-                    ctx[key] = 0.0              # 自己引用自己按 0
+                    # 本行先归零：自己引用自己按 0 处理
+                    for k in calc_keys:
+                        values['%s%d' % (letters[k], rno)] = 0.0
+                    # 1) 计算公式列（结果写进行工程量）
                     row.value, row.cleaned, row.error = self.engine.evaluate(
-                        row.formula, context=ctx, xj_callback=xj)
+                        row.formula, context=values, xj_callback=xj)
                     v = row.value if row.value is not None else 0.0
-                    ctx[key] = v
-                    if not pass_i:
-                        base[key] = row.value
+                    if addr_v:
+                        values[addr_v] = v
+                    if addr_f:
+                        values[addr_f] = v
+                    # 2) 备注列 / 自定义列里自己写的公式
+                    for k in other_keys:
+                        text = cell_source_text(row, k)
+                        is_formula, ftext = cell_formula_text(text, addrs)
+                        if not is_formula:
+                            row.cell_calc.pop(k, None)
+                            continue
+                        val, _cleaned, err = self.engine.evaluate(
+                            ftext, context=values, xj_callback=xj)
+                        values['%s%d' % (letters[k], rno)] = \
+                            val if val is not None else 0.0
+                        row.cell_calc[k] = {'value': val, 'error': err}
+                if values == before:
+                    break
         for book in self.books:
             walk(book)
 
