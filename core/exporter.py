@@ -54,7 +54,7 @@ def export_xlsx(project, path, precision=3, report=None):
     halign = report.get('halign', 'center')
     valign = report.get('valign', 'center')
 
-    cols = project.columns
+    cols = project.all_columns()   # 含明细子目自己的「构件数量」列
     ncol = len(cols)
     last_letter = get_column_letter(ncol)
 

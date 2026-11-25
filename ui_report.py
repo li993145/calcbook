@@ -340,7 +340,7 @@ class ReportViewerDialog(QDialog):
         self._loading = True
         while self.cb_group.count() > 6:      # 前 6 项固定：不汇总 + 5 个内置
             self.cb_group.removeItem(self.cb_group.count() - 1)
-        for cd in (self.win.project.columns or []):
+        for cd in (self.win.project.all_columns() or []):
             if cd.get('builtin'):
                 continue
             self.cb_group.addItem(str(cd.get('title', '列')), str(cd.get('key')))
@@ -355,7 +355,7 @@ class ReportViewerDialog(QDialog):
         self._loading = True
         while self.cb_regex_col.count() > 6:   # 自动 + 5 个内置
             self.cb_regex_col.removeItem(self.cb_regex_col.count() - 1)
-        for cd in (self.win.project.columns or []):
+        for cd in (self.win.project.all_columns() or []):
             if cd.get('builtin'):
                 continue
             self.cb_regex_col.addItem(str(cd.get('title', '列')),

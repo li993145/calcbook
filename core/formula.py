@@ -368,16 +368,34 @@ class FormulaEngine:
         #   ref_addrs 为 None 时是旧版模式：只把 A<行号> 当作引用（V3.7.9 行为）。
         refs = []          # 占位符序号 -> 地址文本
 
+        def _col_no(letters):
+            n = 0
+            for ch in letters:
+                n = n * 26 + (ord(ch) - 64)
+            return n
+
         def _expand_sum(m):
             c1, r1 = m.group(1).upper(), int(m.group(2))
             c2, r2 = m.group(3).upper(), int(m.group(4))
-            if c1 != c2:
-                return m.group(0)          # 跨列区间暂不支持，原样保留
-            a, b = r1, r2
-            if a > b:
-                a, b = b, a
-            b = min(b, a + 1999)
-            return '(' + '+'.join('%s%d' % (c1, i) for i in range(a, b + 1)) + ')'
+            a, b = (r1, r2) if r1 <= r2 else (r2, r1)
+            ci1, ci2 = _col_no(c1), _col_no(c2)
+            if ci1 > ci2:
+                ci1, ci2 = ci2, ci1
+            # V3.9.1：支持跨列矩形区间（点选引用时 Shift+点击会生成 SUM(B2:D5)）
+            cells = []
+            for ci in range(ci1, ci2 + 1):
+                col = ''
+                k = ci
+                while k:
+                    k, rem = divmod(k - 1, 26)
+                    col = chr(65 + rem) + col
+                for ri in range(a, b + 1):
+                    cells.append('%s%d' % (col, ri))
+                    if len(cells) >= 2000:
+                        break
+                if len(cells) >= 2000:
+                    break
+            return '(' + '+'.join(cells) + ')' if cells else m.group(0)
 
         s = re.sub(r'(?i)\bSUM\s*\(\s*([A-Za-z]{1,2})(\d{1,7})\s*:\s*'
                    r'([A-Za-z]{1,2})(\d{1,7})\s*\)', _expand_sum, s)

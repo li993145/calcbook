@@ -2,7 +2,7 @@
 """数据模型：工程 -> 分部树 -> 数据行。JSON 可序列化。"""
 
 import json, os, re, uuid, datetime
-from .formula import FormulaEngine, find_cell_refs
+from .formula import FormulaEngine, find_cell_refs, to_halfwidth
 from .units import default_constants, fmt_num
 
 
@@ -30,6 +30,10 @@ DEFAULT_COLUMNS = [
     {'key': 'img', 'title': '图纸', 'width': 110, 'builtin': True},
     {'key': 'no_count', 'title': '不计', 'width': 80, 'builtin': True},
 ]
+
+# V3.9.1：明细子目自动附加列（不放进 DEFAULT_COLUMNS，默认 9 列保持不变）
+DETAIL_QTY_COLUMN = {'key': 'qty', 'title': '构件数量', 'width': 110,
+                     'builtin': False, 'align': 'center'}
 
 # V3.5 及以前的默认宽度：用于判断老工程里某列宽度是否被用户手动改过
 LEGACY_DEFAULT_WIDTHS = {'code': 120, 'name': 200, 'part': 130,
@@ -99,12 +103,30 @@ def cell_formula_text(text, addrs=None):
     if not s:
         return False, ''
     if s.startswith('='):
-        return True, s[1:].strip()
+        body = s[1:].strip()
+        # 只写了一个 = 是「还没开始输入」，不当公式，免得单元格误标红
+        return (True, body) if body else (False, '')
     if _CJK_RE.search(s):
         return False, ''
     if not find_cell_refs(s, addrs):
         return False, ''
     return True, s
+
+
+def plain_cell_number(text):
+    """普通格文本若是数字则返回 float，否则 None。
+
+    V3.9.1：像「构件数量」列里直接填 6 这种普通数字格，也必须能被
+    =C3*B3 引用。支持全角数字、千分位逗号与前后空格；单位文字（如 6个）
+    不当数字，避免把说明文字算进去。
+    """
+    s = to_halfwidth(str(text or '')).strip().replace(',', '').replace(' ', '')
+    if not re.match(r'^[-+]?\d+(?:\.\d+)?$', s):
+        return None
+    try:
+        return float(s)
+    except ValueError:
+        return None
 
 
 def cell_source_text(row, key):
@@ -341,6 +363,9 @@ class Section:
         # V3.7.9：分部级列名覆盖 {列key: 标题}——同一个项目里，
         # 明细表可以单独把某列叫别的名字（空 dict = 跟随项目级列名）
         self.col_titles = {}
+        # V3.9.1：分部自己的附加列（如新建明细子目时自动加的「构件数量」）。
+        # 项目默认列保持 9 列不变，附加列只在本分部显示、参与本分部运算。
+        self.extra_columns = []
 
     def add_child(self, name="新建分部"):
         c = Section(name, self)
@@ -363,6 +388,9 @@ class Section:
         ct = getattr(self, 'col_titles', None)
         if ct:                                # 有覆盖才写盘，老文件零改动
             d['col_titles'] = dict(ct)
+        ec = getattr(self, 'extra_columns', None)
+        if ec:                                # 有分部自己的列才写盘
+            d['extra_columns'] = [dict(c) for c in ec]
         return d
 
     @classmethod
@@ -373,6 +401,8 @@ class Section:
         s.link = d.get('link', '')
         ct = d.get('col_titles')
         s.col_titles = dict(ct) if isinstance(ct, dict) else {}
+        ec = d.get('extra_columns')
+        s.extra_columns = [dict(c) for c in ec] if isinstance(ec, list) else []
         s.rows = [Row.from_dict(x) for x in d.get('rows', [])]
         s.children = [cls.from_dict(x, s) for x in d.get('children', [])]
         return s
@@ -436,6 +466,54 @@ class Project:
             return self.level_name(0)
         return self.level_name((0 if sec.parent is None else sec.depth()) + 1)
 
+    # ---------------- 列（项目列 + 分部附加列） ----------------
+    def effective_columns(self, sec):
+        """某分部实际显示的列：项目列 + 该分部自己的附加列。
+
+        V3.9.1：默认 9 列不含「构件数量」；新建明细子目时只给那个分部
+        加一列，其它分部看到的仍是项目默认列。附加列插在「工程量」后面。
+        """
+        out = list(self.columns or [])
+        extra = list(getattr(sec, 'extra_columns', None) or []) if sec else []
+        if not extra:
+            return out
+        keys = set(str(c.get('key', '')) for c in out)
+        titles = set(str(c.get('title', '')).strip() for c in out)
+        pos = next((i + 1 for i, c in enumerate(out)
+                    if c.get('key') == 'value'), len(out))
+        for c in extra:
+            k, t = str(c.get('key', '')), str(c.get('title', '')).strip()
+            if k in keys or t in titles:      # 项目里已有同名列就不再重复加
+                continue
+            out.insert(pos, c)      # 共享同一个 dict，改列宽/列名能写回分部定义
+            pos += 1
+            keys.add(k)
+            titles.add(t)
+        return out
+
+    def all_columns(self):
+        """导出 / 报表用：项目列 + 所有分部附加列的并集。"""
+        out = list(self.columns or [])
+        keys = set(str(c.get('key', '')) for c in out)
+        for sec in self.all_sections():
+            for c in (getattr(sec, 'extra_columns', None) or []):
+                if str(c.get('key', '')) not in keys:
+                    out.append(dict(c))
+                    keys.add(str(c.get('key', '')))
+        return out
+
+    def ensure_detail_qty(self, sec):
+        """新建明细子目：给该分部加一列「构件数量」（项目默认列不变）。"""
+        if sec is None:
+            return False
+        existing = list(self.columns or []) + list(getattr(sec, 'extra_columns', None) or [])
+        if any(str(c.get('title', '')).strip() == '构件数量'
+               or c.get('key') == 'qty' for c in existing):
+            return False                       # 项目里已有同名列，直接用它
+        sec.extra_columns = list(getattr(sec, 'extra_columns', None) or [])
+        sec.extra_columns.append(dict(DETAIL_QTY_COLUMN))
+        return True
+
     @staticmethod
     def _pick_name(label, existing):
         """在 existing 里找一个没用过的“层级名+序号”。"""
@@ -492,17 +570,19 @@ class Project:
         自上一个合计行以来的普通行。
         """
         self.engine.set_constants(self.constants)
-        letters = column_letters(self.columns)
-        calc_keys = [k for k in letters if letters[k]]
-        # 除工程量列（结果列）外，其余可计算列都能自己写公式
-        other_keys = [k for k in calc_keys if k not in ('value', 'formula')]
-        f_letter = letters.get('formula', '')
-        v_letter = letters.get('value', '')
 
         # 后序遍历：先子节点后父节点，保证 XJ 能取到子分部结果
         def walk(sec):
             for c in sec.children:
                 walk(c)
+            # V3.9.1：列字母按「本分部实际列」分配——明细子目自己加的
+            # 构件数量列只影响本表的 A/B/C 地址，其它分部不受影响。
+            letters = column_letters(self.effective_columns(sec))
+            calc_keys = [k for k in letters if letters[k]]
+            # 除工程量列（结果列）外，其余可计算列都能自己写公式
+            other_keys = [k for k in calc_keys if k not in ('value', 'formula')]
+            f_letter = letters.get('formula', '')
+            v_letter = letters.get('value', '')
             rows = sec.rows
             n = len(rows)
             if not n:
@@ -577,6 +657,11 @@ class Project:
                         is_formula, ftext = cell_formula_text(text, addrs)
                         if not is_formula:
                             row.cell_calc.pop(k, None)
+                            # 普通数字格（如构件数量填 6）同样进入引用上下文，
+                            # 否则 =C3*B3 会把 6 当 0 算。
+                            num = plain_cell_number(text)
+                            values['%s%d' % (letters[k], rno)] = \
+                                num if num is not None else 0.0
                             continue
                         val, _cleaned, err = self.engine.evaluate(
                             ftext, context=values, xj_callback=xj)

@@ -43,7 +43,7 @@ from ui_drawing import (encode_img, decode_img, capture_region, img_size,
 APP_NAME = "工程量计算书"
 # 本表内部复制/剪切的结构化剪贴板格式（多行整行复制 → 粘到任意位置插入行，不覆盖已有数据）
 CB_ROWS_MIME = 'application/x-calcbook-rows'
-APP_VER = "3.9"
+APP_VER = "3.9.1"
 FILE_EXT = '.gcls'          # 工程文件后缀（内容仍是 JSON，便于排查与迁移）
 # V3.7.3：表格最大行列数与 WPS 表格一致（1048576 行 × 16384 列）
 MAX_ROWS = 1048576
@@ -297,7 +297,7 @@ def system_paper_list():
     items = sorted(items, key=rank)      # 稳定排序，同级别保持驱动原顺序
     return items
 
-# 默认列（实际以 self.project.columns 为准，此处仅作参考/回退）
+# 默认列（实际以 self._cols() 为准，此处仅作参考/回退）
 COLUMNS = [
     ('code', '编号', 120),
     ('name', '项目名称', 200),
@@ -867,6 +867,9 @@ class LiveSyncDelegate(QStyledItemDelegate):
         if isinstance(editor, QLineEdit) and self.win._col_is_formula_cell(key):
             # V3.9：计算公式列之外的列（备注 / 自定义列）同样实时同步到辅助框
             self.win._cell_editor = editor
+            self.win._ref_anchor = ''
+            editor.setToolTip('WPS 式引用：编辑时点击其它单元格可直接插入地址，'
+                              'Shift+点击插入区间 SUM(B2:B5)')
             editor.textChanged.connect(self.win.on_cell_editor_text)
             editor.destroyed.connect(self.win._on_editor_destroyed)
         # V3.7.0：符号即时翻译 + 回车键效果（向下 / 向右）
@@ -3114,6 +3117,7 @@ class MainWindow(QMainWindow):
         self._print_area = None    # 选定打印区域：{'section', 'rows', 'keys'}
         self._syncing = False      # 双向同步防循环标志
         self._cell_editor = None   # 当前正在编辑的表格单元格编辑器
+        self._ref_anchor = ''      # WPS 式点选引用：区间起点地址
         # 自动保存设置
         self.autosave_enabled = self.settings.value('autosave_enabled', False, type=bool)
         self.autosave_min = int(self.settings.value('autosave_min', 5))
@@ -3540,6 +3544,37 @@ class MainWindow(QMainWindow):
                             pass
                         self.paste_text(clip)
                         return True
+            # V3.9.1：WPS 式点选引用——正在编辑公式格时点击其它单元格，
+            # 把它的地址插到光标处（Shift+点击生成区间），而不是挪走选中格。
+            if (et == QEvent.MouseButtonPress and ev.button() == Qt.LeftButton
+                    and hasattr(self, 'table') and obj is self.table.viewport()
+                    and getattr(self, '_cell_editor', None) is not None):
+                try:
+                    ed = self._cell_editor
+                    hit = self.table.indexAt(ev.pos())
+                    if hit.isValid():
+                        letter = self.calc_letters().get(
+                            self.col_key(hit.column()), '')
+                        if letter:
+                            addr = '%s%d' % (letter, hit.row() + 1)
+                            if (ev.modifiers() & Qt.ShiftModifier
+                                    and getattr(self, '_ref_anchor', '')
+                                    and self._ref_anchor != addr):
+                                ins = 'SUM(%s:%s)' % (self._ref_anchor, addr)
+                            else:
+                                ins = addr
+                                self._ref_anchor = addr
+                            pos = ed.cursorPosition()
+                            text = ed.text()
+                            if not text.strip():
+                                ins = '=' + ins
+                            ed.setText(text[:pos] + ins + text[pos:])
+                            ed.setCursorPosition(pos + len(ins))
+                            ed.setFocus()
+                            self.status.showMessage('已插入单元格引用 %s' % ins, 2000)
+                            return True
+                except Exception:
+                    pass
             if (et == QEvent.MouseButtonPress and ev.button() == Qt.LeftButton
                     and hasattr(self, 'table') and obj is self.table.viewport()):
                 # V3.6.0：WPS 行为——多选/全选后普通左键点某格只选这一格。
@@ -4657,7 +4692,7 @@ class MainWindow(QMainWindow):
         <li><b>括号快捷键</b>：F4 公式前插入 <code>()</code>、F5 插入点插入 <code>()</code>、F6 插入点插入 <code>[]</code>、F7 末尾追加 <code>[]</code>；在单元格里直接打字时也生效。</li>
         <li><b>特殊写法</b>：度分秒如 34°56′30″ 可直接计算；<code>√9=3</code>、<code>√(3+4)</code>、<code>2×√9</code> 均可；写在公式开头的钢筋规格（如 <code>Φ8@200 4×5</code>=20）不参与计算，旧写法 Φ² / Φ³ / Φ⁴ 仍兼容。<b>钢筋等级符号</b>请点「特殊符号」：面板里用 <b>TssdEng（探索者）字体的国标制图符号</b>（一级 HPB300 / 二级 HRB335 / 三级 HRB400 / 四级 HRB500），点击即插入公式；这些符号需 TssdEng 字体显示（软件已随包附带），本机没有该字体时该组会自动隐藏。</li>
         <li><b>单元格引用与合计行（V3.7.9）</b>：公式里可以用 <code>A行号</code> 引用<b>本分部</b>内其他行的工程量——如 <code>A12*0.35</code>（第 12 行工程量×0.35）、<code>SUM(A1:A10)</code>（第 1～10 行求和）；引用上下的行都能算对。右键菜单<b>「插入合计行」</b>在本分部末尾加一行合计，工程量自动汇总自上一个合计行以来的普通行（合计行加粗、不可手改、不参与上级汇总和报表分类汇总，不会重复计数）。引用只在本分部内有效；删行改行后重算会自动更新。</li>
-        <li><b>任意单元格之间运算（V3.9）</b>：公式里可以写<b>列字母 + 行号</b>的二维地址，<b>跨列、跨行随便算</b>——如 <code>A2*B3</code>（第 2 行工程量 × 第 3 行「计算公式」列的值）、<code>A1*A2*0.35</code>、<code>SUM(B1:B10)</code>。<b>列字母标在表头上</b>（默认：工程量=A、计算公式=B、备注=C，自定义列依次 D、E…；序号 / 清单编号 / 项目名称 / 计量单位 / 图纸 / 不计 是标识列，不参与引用），行号是<b>本分部内</b>的行号，鼠标悬停表头或选中单元格可在状态栏看到地址。<b>公式也不只写在「计算公式」列</b>：<b>备注列和自定义列同样能写公式</b>（以 <code>=</code> 开头，或内容里带单元格地址），算出来的结果会显示在格子里（鼠标悬停可看原公式），并能再被别的格引用；底部的<b>公式辅助输入框</b>也跟着联动，选中备注列或自定义列就能直接在那里写。工程量列是结果列，不能直接写公式。</li>
+        <li><b>任意单元格之间运算（V3.9；V3.9.1 改进）</b>：公式里可以写<b>列字母 + 行号</b>的二维地址，<b>跨列、跨行随便算</b>——如 <code>A2*B3</code>、<code>A1*A2*0.35</code>、<code>SUM(B1:B10)</code>（跨列矩形区间 <code>SUM(A1:C5)</code> 也支持）。列字母（默认：工程量=A、计算公式=B、备注=C，自定义列依次 D、E…）<b>不写在表头上</b>，鼠标悬停表头或选中单元格可在提示 / 状态栏看到；行号是<b>本分部内</b>的行号。序号 / 清单编号 / 项目名称 / 计量单位 / 图纸 / 不计 是标识列，不参与引用。<b>公式也不只写在「计算公式」列</b>：备注列和自定义列都能写公式（以 <code>=</code> 开头，或内容里带单元格地址），算出的结果显示在格子里（悬停可看原公式），并能被别的格引用；<b>普通数字格（如构件数量填 6）同样能被引用</b>，不再当成 0。底部<b>公式辅助输入框</b>跟着联动；工程量列是结果列，不能直接写公式。<b>WPS 式点选引用（V3.9.1）</b>：单元格编辑中点别的格子会把地址插到光标处，<b>Shift + 点击</b>插入 <code>SUM(区间)</code>，边点边出结果。新建明细子目时该表会<b>自动加一列「构件数量」</b>（默认 9 列不变，已有分部不受影响）。</li>
         <li><b>汇总与配色</b>：每个分部自动「小计」（XJ 子分部汇总函数已取消，旧工程中的 XJ() 公式仍可正常计算）。公式列与辅助框用同一套配色：数字红、运算符黑、<code>[备注]</code>深绿、汉字淡绿、@常量紫、上标蓝，便于核对。</li>
         </ul>
 
@@ -4807,9 +4842,21 @@ class MainWindow(QMainWindow):
 
     # ---------------- V3.9：单元格地址（列字母 + 行号） ----------------
 
+    def _cols(self):
+        """当前分部实际显示的列（项目列 + 该分部自己的附加列）。"""
+        return self.project.effective_columns(getattr(self, 'current_section', None))
+
+    def _col_store(self, cd):
+        """列定义 cd 所属的真实列表：项目列或当前分部的附加列。"""
+        sec = getattr(self, 'current_section', None)
+        for c in (getattr(sec, 'extra_columns', None) or []):
+            if c is cd:
+                return sec.extra_columns
+        return self.project.columns
+
     def calc_letters(self):
         """列 key → 单元格地址字母（工程量列固定 A，其余可计算列依次 B、C…）。"""
-        return column_letters(self.project.columns)
+        return column_letters(self._cols())
 
     def calc_keys(self):
         """能写公式、也能被引用的列 key 集合。"""
@@ -4846,28 +4893,31 @@ class MainWindow(QMainWindow):
     def refresh_table(self):
         self._loading = True
         sec = self.current_section
-        cols = self.project.columns
+        cols = self._cols()
         self.table.setColumnCount(len(cols))
         # V3.7.9：表头显示「分部级列名覆盖」——明细表可单独给列起名
-        # V3.9：表头加上单元格地址的列字母（A/B/C…），公式里就按这个引用
+        # V3.9.1：表头只显示列名，不再把 A/B/C 字母拼在标题前面；
+        #         地址改由表头悬浮提示与状态栏给出（V3.9 用户反馈：默认列前面
+        #         加字母看着别扭）。
         letters = self.calc_letters()
-        head_labels = []
-        for c in cols:
-            t = self._col_display_title(c)
-            letter = letters.get(c['key'], '')
-            head_labels.append(('%s %s' % (letter, t)) if letter else t)
+        head_labels = [self._col_display_title(c) for c in cols]
         self.table.setHorizontalHeaderLabels(head_labels)
         for j, cd in enumerate(cols):
             hi = self.table.horizontalHeaderItem(j)
-            if hi is not None and cd['key'] == 'unit':
-                hi.setToolTip('双击（或选中后再点一下）弹出常用单位下拉框，可直接选择\n'
-                              'm/m2/m3/kg 保留2位、t 保留3位、个/块/套/处/台/组 取整')
-            # V3.9：表头提示本列的单元格地址（公式里按这个地址引用）
+            if hi is None:
+                continue
+            tips = []
+            if cd['key'] == 'unit':
+                tips.append('双击（或选中后再点一下）弹出常用单位下拉框，可直接选择\n'
+                            'm/m2/m3/kg 保留2位、t 保留3位、个/块/套/处/台/组 取整')
+            # V3.9.1：地址只放在悬浮提示里，标题保持干净的中文列名
             letter = letters.get(cd['key'], '')
-            if hi is not None and letter:
-                hi.setToolTip('本列单元格地址：%s1、%s2 …（行号为本分部内的行号）\n'
-                              '公式里可直接引用其它单元格，例如 %s2*%s3'
-                              % (letter, letter, letter, letter))
+            if letter:
+                tips.append('本列单元格地址：%s1、%s2 …（行号为本分部内的行号）\n'
+                            '公式里可直接引用其它单元格，例如 %s2*%s3'
+                            % (letter, letter, letter, letter))
+            if tips:
+                hi.setToolTip('\n\n'.join(tips))
         # 应用列宽（默认比例）。setSectionsMovable 下按逻辑索引设置宽度
         hh = self.table.horizontalHeader()
         for j, cd in enumerate(cols):
@@ -4972,7 +5022,7 @@ class MainWindow(QMainWindow):
         item.column() / currentColumn() / QModelIndex.column() 返回的都是模型逻辑列；
         表头拖动只改变视觉顺序，不改变 item 的逻辑列，故此处直接按逻辑列取值。
         """
-        cols = self.project.columns
+        cols = self._cols()
         if 0 <= col < len(cols):
             return cols[col]['key']
         return ''
@@ -5010,7 +5060,7 @@ class MainWindow(QMainWindow):
             item = QTableWidgetItem('')
             # V3.7.3：新建 item 时应用列默认对齐（序号/编号/单位/工程量/居中自定义列），
             # 避免填充、粘贴等路径新建的格一律靠左
-            cd = self.project.columns[col] if 0 <= col < len(self.project.columns) else {}
+            cd = self._cols()[col] if 0 <= col < len(self._cols()) else {}
             key = cd.get('key', '')
             if key in ('seq', 'code', 'unit', 'value') or cd.get('align') == 'center':
                 item.setTextAlignment(Qt.AlignCenter | Qt.AlignVCenter)
@@ -5116,7 +5166,7 @@ class MainWindow(QMainWindow):
             return None
 
     def _img_col_index(self):
-        for j, cd in enumerate(self.project.columns):
+        for j, cd in enumerate(self._cols()):
             if cd['key'] == 'img':
                 return j
         return -1
@@ -5319,7 +5369,7 @@ class MainWindow(QMainWindow):
                 return
             key = self.col_key(col)
             title = self._col_display_title(
-                self.project.columns[col]) if 0 <= col < len(self.project.columns) else key
+                self._cols()[col]) if 0 <= col < len(self._cols()) else key
             self.lbl_status.setToolTip('当前单元格地址：%s（%s 列，第 %d 行）\n'
                                        '公式里可直接引用，例如 %s*%s'
                                        % (addr, title, row + 1, addr, addr))
@@ -5332,6 +5382,7 @@ class MainWindow(QMainWindow):
 
     def _on_editor_destroyed(self, *args):
         self._cell_editor = None
+        self._ref_anchor = ''
         # 单元格编辑结束：把本次连续输入记成一步可撤销操作
         self.commit_edit()
 
@@ -5557,7 +5608,7 @@ class MainWindow(QMainWindow):
         while len(sec.rows) < need:
             sec.rows.append(Row())
         added = len(sec.rows) - before_n
-        cols = self.project.columns
+        cols = self._cols()
         # V3.4：从锚点开始按“表头视觉顺序”落列，移动列后仍贴到用户看到的位置
         vis_order = self.visual_col_order()
         try:
@@ -5611,7 +5662,7 @@ class MainWindow(QMainWindow):
         if not path:
             return
         sec = self.current_section
-        dlg = ImportTableDialog(self, self.project.columns,
+        dlg = ImportTableDialog(self, self._cols(),
                                 default_row=len(sec.rows) + 1, path=path)
         if dlg.exec_() != QDialog.Accepted:
             return
@@ -5627,7 +5678,7 @@ class MainWindow(QMainWindow):
         while len(sec.rows) < need:
             sec.rows.append(Row())
         added = len(sec.rows) - before_n
-        cols = self.project.columns
+        cols = self._cols()
         self._loading = True
         n_cells = 0
         for i, srow in enumerate(src_rows):
@@ -5701,11 +5752,14 @@ class MainWindow(QMainWindow):
         self.push_undo('新建' + label)
         new = sec.add_child(name)
         self._apply_default_rows(new)
+        # V3.9.1：新建的下一级就是一张新计算表，同样自动带「构件数量」列
+        added_qty = self.project.ensure_detail_qty(new)
         sec.expanded = True
         self.refresh_tree()
         self.select_section(new)
         self._dirty = True
-        self.status.showMessage('已新建%s「%s」' % (label, new.name), 3000)
+        self.status.showMessage('已新建%s「%s」%s' % (
+            label, new.name, '（已自动加「构件数量」列）' if added_qty else ''), 3000)
 
     def select_section(self, sec):
         if sec is None:
@@ -5988,6 +6042,8 @@ class MainWindow(QMainWindow):
         new.expanded = getattr(sec, 'expanded', True)
         new.link = getattr(sec, 'link', '')          # V3.7.6 链接一起复制
         new.col_titles = dict(getattr(sec, 'col_titles', {}) or {})  # V3.7.9 列名覆盖
+        # V3.9.1：分部自己的附加列（构件数量）跟着节点一起复制
+        new.extra_columns = [dict(c) for c in (getattr(sec, 'extra_columns', None) or [])]
         new.rows = []
         for r in getattr(sec, 'rows', []) or []:
             nr = Row.from_dict(r.to_dict())
@@ -6272,7 +6328,7 @@ class MainWindow(QMainWindow):
             if r < 0 or c < 0:
                 return
             indexes = [self.table.model().index(r, c)]
-        cols = self.project.columns
+        cols = self._cols()
         sec = self.current_section
         touched = 0
         if record_undo:
@@ -6604,7 +6660,7 @@ class MainWindow(QMainWindow):
             return False
         if not hasattr(self, 'table'):
             return False
-        cols = self.project.columns
+        cols = self._cols()
         if not cols or self.table.columnCount() != len(cols):
             return False
         # 预留一条竖向滚动条的宽度：否则“填满”之后滚动条一出现就多出横向滚动条
@@ -6746,9 +6802,9 @@ class MainWindow(QMainWindow):
         cols = list(cols)
         done = 0
         for j in cols:
-            if not (0 <= j < len(self.project.columns)):
+            if not (0 <= j < len(self._cols())):
                 continue
-            cd = self.project.columns[j]
+            cd = self._cols()[j]
             w = measure(cd['title']) + 30
             for i in range(self.table.rowCount()):
                 it = self.table.item(i, j)
@@ -6860,7 +6916,7 @@ class MainWindow(QMainWindow):
         table = getattr(self, 'table', None)
         if table is None or not hasattr(self, 'project'):
             return
-        for j, cd in enumerate(self.project.columns):
+        for j, cd in enumerate(self._cols()):
             if j >= table.columnCount():
                 break
             w = int(table.columnWidth(j))
@@ -6918,7 +6974,7 @@ class MainWindow(QMainWindow):
         menu.addAction('在右侧添加列', lambda: self.add_column(col + 1))
         if col >= 0:
             menu.addAction('设置本列列宽…', lambda c=col: self.set_column_width_dialog([c]))
-            cd = self.project.columns[col]
+            cd = self._cols()[col]
             menu.addAction(f'整列填充颜色「{cd["title"]}」…',
                            lambda c=col: self.fill_color_dialog('col', c))
             menu.addAction(f'清除「{cd["title"]}」整列填充',
@@ -6953,9 +7009,9 @@ class MainWindow(QMainWindow):
         转半角并合并连续空格。公式/不计/工程量列跳过——公式里的全角括号
         是注释语法，转半角会改变语义。"""
         from ui_import import narrow_width
-        if not (0 <= col < len(self.project.columns)):
+        if not (0 <= col < len(self._cols())):
             return
-        cd = self.project.columns[col]
+        cd = self._cols()[col]
         key = cd['key']
         if key in ('no_count', 'formula', 'value'):
             QMessageBox.information(self, APP_NAME,
@@ -7015,7 +7071,7 @@ class MainWindow(QMainWindow):
         return cd['title']
 
     def rename_column(self, col):
-        cd = self.project.columns[col]
+        cd = self._cols()[col]
         name, ok = QInputDialog.getText(self, '重命名列', '列名称：', QLineEdit.Normal,
                                         self._col_display_title(cd))
         if not (ok and name.strip()):
@@ -7059,7 +7115,7 @@ class MainWindow(QMainWindow):
         self._dirty = True
 
     def delete_column(self, col):
-        cd = self.project.columns[col]
+        cd = self._cols()[col]
         if QMessageBox.question(self, '确认删除', f'确定删除列「{cd["title"]}」？该列数据也会删除。',
                                 QMessageBox.Yes | QMessageBox.No) != QMessageBox.Yes:
             return
@@ -7068,7 +7124,7 @@ class MainWindow(QMainWindow):
         for sec in self.project.all_sections():
             for row in sec.rows:
                 row.custom.pop(key, None)
-        self.project.columns.pop(col)
+        self._col_store(cd).remove(cd)
         self.refresh_table()
         self._dirty = True
 
@@ -7129,7 +7185,7 @@ class MainWindow(QMainWindow):
         if not (0 <= row_index < self.table.rowCount()):
             return
         col = 0
-        for j, cd in enumerate(self.project.columns):
+        for j, cd in enumerate(self._cols()):
             if cd['key'] == key:
                 col = j
                 break
@@ -7177,8 +7233,8 @@ class MainWindow(QMainWindow):
                     cnt += 1
         elif scope == 'col':
             c = col if col is not None else self.table.currentColumn()
-            if 0 <= c < len(self.project.columns):
-                cd = self.project.columns[c]
+            if 0 <= c < len(self._cols()):
+                cd = self._cols()[c]
                 cd['fill'] = color or ''
                 for s in self.project.all_sections():
                     for r in s.rows:
@@ -7423,9 +7479,9 @@ class MainWindow(QMainWindow):
 
     def column_align(self, col, align):
         """列头右键“整列对齐”：当前分部该列全部行（不含“不计”列）。"""
-        if not (0 <= col < len(self.project.columns)):
+        if not (0 <= col < len(self._cols())):
             return
-        key = self.project.columns[col]['key']
+        key = self._cols()[col]['key']
         if key == 'no_count':
             QMessageBox.information(self, APP_NAME, '「不计」列不能设置对齐。')
             return
@@ -7472,7 +7528,7 @@ class MainWindow(QMainWindow):
         from ui_import import narrow_width
         idxs = self.table.selectedIndexes()
         sec = self.current_section
-        cols = self.project.columns
+        cols = self._cols()
         targets = []
         for i in idxs:
             r, c = i.row(), i.column()
@@ -7541,7 +7597,7 @@ class MainWindow(QMainWindow):
         rows = sorted({idx.row() for idx in self.table.selectedIndexes()})
         if not rows:
             return
-        cols = self.project.columns
+        cols = self._cols()
         vis_order = self.visual_col_order()
         lines = []
         for r in rows:
@@ -7564,7 +7620,7 @@ class MainWindow(QMainWindow):
             return
         rows = sorted({idx.row() for idx in idxs}, reverse=True)
         sel_cols = {idx.column() for idx in idxs}
-        n_col = len(self.project.columns)
+        n_col = len(self._cols())
         full_rows = (len(sel_cols) == n_col)
         # 先把数据写入剪贴板（结构化整行 / 普通框选 TSV）
         self.copy_cells(cut=True)
@@ -7599,7 +7655,7 @@ class MainWindow(QMainWindow):
             return
         rect = self.table.sel_rect()
         sec = self.current_section
-        cols = self.project.columns
+        cols = self._cols()
         if rect is None:
             self.copy_rows()
             return
@@ -7642,7 +7698,7 @@ class MainWindow(QMainWindow):
     def apply_fill_drag(self, src, tgt):
         """填充柄松开：把源区值按 WPS 规则填充到目标区（自动序号）。"""
         sec = self.current_section
-        cols = self.project.columns
+        cols = self._cols()
         r0, r1, c0, c1 = src
         tr0, tr1, tc0, tc1 = tgt
         vertical = (tc0, tc1) == (c0, c1)       # 纵向填充
@@ -7702,7 +7758,7 @@ class MainWindow(QMainWindow):
         """拾取当前单元格格式（字体 + 填充色），等待点击目标区域。"""
         r, c = self.table.currentRow(), self.table.currentColumn()
         sec = self.current_section
-        cols = self.project.columns
+        cols = self._cols()
         if not (0 <= r < len(sec.rows)) or not (0 <= c < len(cols)):
             QMessageBox.information(self, APP_NAME, '请先选中要复制格式的单元格。')
             return
@@ -7741,7 +7797,7 @@ class MainWindow(QMainWindow):
         if not fmt:
             return
         sec = self.current_section
-        cols = self.project.columns
+        cols = self._cols()
         r0, r1, c0, c1 = rect
         self.push_undo('格式刷')
         n = 0
@@ -7778,7 +7834,7 @@ class MainWindow(QMainWindow):
 
     def sort_dialog(self):
         from ui_sortfilter import SortDialog, sort_rows_with_colors
-        cols = self.project.columns
+        cols = self._cols()
         sec = self.current_section
         col = self.table.currentColumn()
         if not (0 <= col < len(cols)):
@@ -7808,7 +7864,7 @@ class MainWindow(QMainWindow):
 
     def filter_dialog(self):
         from ui_sortfilter import FilterDialog, filter_match
-        cols = self.project.columns
+        cols = self._cols()
         sec = self.current_section
         col = self.table.currentColumn()
         if not (0 <= col < len(cols)):
@@ -7854,7 +7910,7 @@ class MainWindow(QMainWindow):
         """按生效的筛选条件隐藏当前分部不符合的行（只隐藏，不删数据）。"""
         f = self._filter
         sec = self.current_section
-        cols = self.project.columns
+        cols = self._cols()
         if f and not any(c['key'] == f['key'] for c in cols):
             self._filter = None                     # 列被删了，筛选失效
             f = None
@@ -8128,7 +8184,7 @@ class MainWindow(QMainWindow):
             if not it:
                 return None, it
             key = it.data(Qt.UserRole)
-            for cd in self.project.columns:
+            for cd in self._cols():
                 if cd['key'] == key:
                     return cd, it
             return None, it
@@ -8377,14 +8433,14 @@ class MainWindow(QMainWindow):
         area = getattr(self, '_print_area', None)
         if area and area.get('keys'):
             keys = set(area['keys'])
-            return [c for c in self.project.columns if c.get('key') in keys]
-        return self.project.columns
+            return [c for c in self._cols() if c.get('key') in keys]
+        return self._cols()
 
     def _report_col_pct(self):
         """各列宽度百分比：优先取界面上当前的真实列宽（含手动拖动后的宽度）。"""
         table = getattr(self, 'table', None)
         cols = self._active_columns()
-        key_index = {c.get('key'): i for i, c in enumerate(self.project.columns)}
+        key_index = {c.get('key'): i for i, c in enumerate(self._cols())}
         cw = []
         for i, c in enumerate(cols):
             w = 0.0
@@ -9520,13 +9576,18 @@ class MainWindow(QMainWindow):
         self.push_undo('插入明细子目')
         new = Section(name, sec)
         self._apply_default_rows(new)
+        # V3.9.1：新建明细子目自动带一列「构件数量」——只加到这个分部，
+        # 项目默认 9 列不变，已有分部也不受影响。
+        added_qty = self.project.ensure_detail_qty(new)
         sec.children.insert(0, new)
         sec.expanded = True
         self.project.recalc()
         self.refresh_tree()
         self.select_section(new)
         self._dirty = True
-        self.status.showMessage('已插入明细子目「%s」，可直接填写' % new.name, 3000)
+        self.status.showMessage(
+            '已插入明细子目「%s」，可直接填写%s' % (
+                new.name, '（已自动加「构件数量」列）' if added_qty else ''), 3000)
 
     def set_section_link(self, *args):
         """为当前导航节点设置链接（网址 http(s)://… 或本地文件路径）。"""
