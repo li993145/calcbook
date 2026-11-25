@@ -43,7 +43,7 @@ from ui_drawing import (encode_img, decode_img, capture_region, img_size,
 APP_NAME = "工程量计算书"
 # 本表内部复制/剪切的结构化剪贴板格式（多行整行复制 → 粘到任意位置插入行，不覆盖已有数据）
 CB_ROWS_MIME = 'application/x-calcbook-rows'
-APP_VER = "3.9.2"
+APP_VER = "3.9.3"
 FILE_EXT = '.gcls'          # 工程文件后缀（内容仍是 JSON，便于排查与迁移）
 # V3.7.3：表格最大行列数与 WPS 表格一致（1048576 行 × 16384 列）
 MAX_ROWS = 1048576
@@ -7042,8 +7042,38 @@ class MainWindow(QMainWindow):
         self._dirty = True
         self.status.showMessage('已将「%s」列 %d 个单元格转为半角（Ctrl+Z 可撤销）' % (cd['title'], n), 5000)
 
+    def _add_local_columns(self, n, name):
+        """V3.9.3：把新列加到「当前计算书/明细表」自己身上。
+
+        老逻辑写 project.columns → 同一单项工程下所有表都跟着加列，
+        与用户「只加到当前表」的要求不符。新逻辑写当前分部的
+        extra_columns（随工程保存、复制节点带走、只参与本表运算）。
+        返回新列的列定义列表（供对话框即时刷新列表用），失败返回 None。
+        """
+        sec = getattr(self, 'current_section', None)
+        if sec is None:
+            QMessageBox.information(self, APP_NAME, '请先选中一张计算书 / 明细表，再添加列。')
+            return None
+        if not isinstance(getattr(sec, 'extra_columns', None), list):
+            sec.extra_columns = []
+        used = set(str(c.get('title', '')).strip() for c in self._cols())
+        made = []
+        for i in range(n):
+            key = 'c_' + uuid.uuid4().hex[:8]
+            base = name if n == 1 else '%s%d' % (name, i + 1)
+            title, k = base, 2
+            while title in used:              # 避开项目列 / 本表已附加的同名列
+                title = '%s%d' % (base, k)
+                k += 1
+            used.add(title)
+            cd = {'key': key, 'title': title, 'width': 120,
+                  'builtin': False, 'align': 'center'}
+            sec.extra_columns.append(cd)
+            made.append(cd)
+        return made
+
     def add_column(self, index):
-        cap = MAX_COLS - len(self.project.columns)
+        cap = MAX_COLS - len(self._cols())
         if cap <= 0:
             QMessageBox.information(self, APP_NAME,
                                     '已达到最大列数（%d 列），无法继续添加。' % MAX_COLS)
@@ -7057,16 +7087,17 @@ class MainWindow(QMainWindow):
             return
         name = name.strip()
         self.push_undo('添加列')
-        for i in range(n):
-            key = 'c_' + uuid.uuid4().hex[:8]
-            # V3.6.1：新增的自定义列默认文本居中对齐（用户仍可右键改对齐）
-            # V3.7.3：一次添加多列时自动编号（新列1 / 新列2 …）
-            title = name if n == 1 else '%s%d' % (name, i + 1)
-            self.project.columns.insert(index + i, {'key': key, 'title': title, 'width': 120,
-                                                    'builtin': False, 'align': 'center'})
+        made = self._add_local_columns(n, name)
+        if not made:
+            return
+        self.project.recalc()
         self.refresh_table()
         self._dirty = True
-        self.status.showMessage('已添加 %d 列' % n if n > 1 else '已添加列「%s」' % name, 3000)
+        tip = '已在本表「%s」添加 %d 列（其它计算书 / 明细表不受影响）' % (
+            getattr(self.current_section, 'name', ''), n) if n > 1 else \
+              '已在本表「%s」添加列「%s」（其它计算书 / 明细表不受影响）' % (
+                  getattr(self.current_section, 'name', ''), made[0]['title'])
+        self.status.showMessage(tip, 4000)
 
     def _col_display_title(self, cd):
         """列的显示标题：当前分部有覆盖名就用覆盖名，否则用项目级标题。"""
@@ -7121,15 +7152,22 @@ class MainWindow(QMainWindow):
 
     def delete_column(self, col):
         cd = self._cols()[col]
-        if QMessageBox.question(self, '确认删除', f'确定删除列「{cd["title"]}」？该列数据也会删除。',
+        # V3.9.3：只允许删本表自己新增的列；项目级默认列删了会影响全部表，
+        # 如需调整默认列请到「项目选项 → 数据列定义」统一改。
+        if cd not in (getattr(self.current_section, 'extra_columns', None) or []):
+            QMessageBox.information(self, APP_NAME,
+                                    '「%s」是项目级默认列，不能在单张表里删除。' % cd['title'])
+            return
+        if QMessageBox.question(self, '确认删除',
+                                f'确定删除本表列「{cd["title"]}」？该列在本表的数据也会删除。',
                                 QMessageBox.Yes | QMessageBox.No) != QMessageBox.Yes:
             return
         key = cd['key']
         self.push_undo('删除列')
-        for sec in self.project.all_sections():
-            for row in sec.rows:
-                row.custom.pop(key, None)
-        self._col_store(cd).remove(cd)
+        for row in self.current_section.rows:   # 只清本表数据
+            row.custom.pop(key, None)
+        self.current_section.extra_columns.remove(cd)
+        self.project.recalc()
         self.refresh_table()
         self._dirty = True
 
@@ -8162,16 +8200,22 @@ class MainWindow(QMainWindow):
             self._dirty = True
 
     def column_setup(self):
-        """数据列定义：集中管理列的显示与宽度。"""
+        """数据列定义：管理【当前计算书 / 明细表】的列（V3.9.3 起）。
+
+        项目级默认列在本对话框里可改名（只作用于本表）与调宽；
+        新增 / 删除只作用于本表的附加列，不影响其它表。
+        """
         from PyQt5.QtWidgets import QListWidget, QListWidgetItem
         dlg = QDialog(self)
-        dlg.setWindowTitle('数据列定义')
+        dlg.setWindowTitle('数据列定义（当前表）')
         dlg.resize(520, 460)
         lay = QVBoxLayout(dlg)
-        lay.addWidget(QLabel('双击列名可重命名；右侧可调整宽度（像素），可新增/删除自定义列。'))
+        lay.addWidget(QLabel('仅作用于当前表「%s」：双击列名可重命名；可调整宽度；'
+                             '新增 / 删除只影响本表。' %
+                             getattr(getattr(self, 'current_section', None), 'name', '')))
         lst = QListWidget()
-        for cd in self.project.columns:
-            it = QListWidgetItem(f"{cd['title']}    宽度：{cd.get('width',100)}")
+        for cd in self._cols():
+            it = QListWidgetItem(f"{self._col_display_title(cd)}    宽度：{cd.get('width',100)}")
             it.setData(Qt.UserRole, cd['key'])
             it.setFlags(it.flags() | Qt.ItemIsEditable)
             lst.addItem(it)
@@ -8197,8 +8241,16 @@ class MainWindow(QMainWindow):
         def rename(it):
             cd, _ = cur_cd()
             if cd and it.text().strip():
-                cd['title'] = it.text().split('    宽度')[0].strip()
-                it.setText(f"{cd['title']}    宽度：{cd.get('width',100)}")
+                new_title = it.text().split('    宽度')[0].strip()
+                # V3.9.3：改名只作用于本表——附加列直接改自己的定义；
+                # 项目级列用分部级列名覆盖，不动全局（其它表不受影响）
+                if cd in (getattr(self.current_section, 'extra_columns', None) or []):
+                    cd['title'] = new_title
+                else:
+                    if not isinstance(getattr(self.current_section, 'col_titles', None), dict):
+                        self.current_section.col_titles = {}
+                    self.current_section.col_titles[cd['key']] = new_title
+                it.setText(f"{self._col_display_title(cd)}    宽度：{cd.get('width',100)}")
                 self.refresh_table()
                 self._dirty = True
         lst.itemChanged.connect(rename)
@@ -8219,13 +8271,13 @@ class MainWindow(QMainWindow):
         def add_col():
             name, ok = QInputDialog.getText(self, '新增列', '列名称：', QLineEdit.Normal, '新列')
             if ok and name.strip():
-                key = 'c_' + uuid.uuid4().hex[:8]
-                self.project.columns.append({'key': key, 'title': name.strip(), 'width': 120,
-                                             'builtin': False, 'align': 'center'})
-                it = QListWidgetItem(f"{name.strip()}    宽度：120")
-                it.setData(Qt.UserRole, key)
-                it.setFlags(it.flags() | Qt.ItemIsEditable)
-                lst.addItem(it)
+                made = self._add_local_columns(1, name.strip())
+                for cd in (made or []):
+                    it = QListWidgetItem(f"{cd['title']}    宽度：{cd.get('width',120)}")
+                    it.setData(Qt.UserRole, cd['key'])
+                    it.setFlags(it.flags() | Qt.ItemIsEditable)
+                    lst.addItem(it)
+                self.project.recalc()
                 self.refresh_table()
                 self._dirty = True
         btn_add.clicked.connect(add_col)
@@ -8234,15 +8286,20 @@ class MainWindow(QMainWindow):
             cd, it = cur_cd()
             if not cd:
                 return
-            if QMessageBox.question(self, '确认', f"删除列「{cd['title']}」？该列数据也会删除。",
+            if cd not in (getattr(self.current_section, 'extra_columns', None) or []):
+                QMessageBox.information(self, APP_NAME,
+                                        '「%s」是项目级默认列，不能在单张表里删除；'
+                                        '只能删除本表自己新增的列。' % cd['title'])
+                return
+            if QMessageBox.question(self, '确认', f"删除本表列「{cd['title']}」？该列在本表的数据也会删除。",
                                     QMessageBox.Yes | QMessageBox.No) != QMessageBox.Yes:
                 return
             key = cd['key']
-            for sec in self.project.all_sections():
-                for row in sec.rows:
-                    row.custom.pop(key, None)
-            self.project.columns.remove(cd)
+            for row in self.current_section.rows:   # 只清本表数据，其它表不受影响
+                row.custom.pop(key, None)
+            self.current_section.extra_columns.remove(cd)
             lst.takeItem(lst.row(it))
+            self.project.recalc()
             self.refresh_table()
             self._dirty = True
         btn_del.clicked.connect(del_col)

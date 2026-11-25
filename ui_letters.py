@@ -47,7 +47,7 @@ class ColumnLetterBar(QWidget):
         """返回鼠标 x 处的逻辑列号（考虑水平滚动与列拖动），不在任何列上返回 -1。"""
         table = self.win.table
         hh = table.horizontalHeader()
-        left = table.verticalHeader().width() - table.horizontalScrollBar().value()
+        left = -table.horizontalScrollBar().value()
         cx = x
         for vis in range(hh.count()):
             logical = hh.logicalIndex(vis)
@@ -82,12 +82,15 @@ class ColumnLetterBar(QWidget):
         if not cols:
             return
 
-        x = table.verticalHeader().width() - table.horizontalScrollBar().value()
+        # 关键：sectionViewportPosition() 已含水平滚动，直接给出每段在表头
+        # viewport 里的 x；再累加表头在表格中的位置（行号列宽 31px）即是
+        # 标尺坐标。切勿用 horizontalScrollBar().value() 当像素偏移——
+        # 它的单位是「列」，与像素位移完全不成比例，会导致字母整体错位。
+        hx = hh.x()
         cur_visual = hh.visualIndex(table.currentColumn()) if table.currentColumn() >= 0 else -1
         font = QFont(self.font())
         font.setPointSize(max(8, font.pointSize() - 1))
         p.setFont(font)
-        fm = p.fontMetrics()
         border = QColor('#d5dce5')
 
         for vis in range(hh.count()):
@@ -97,6 +100,7 @@ class ColumnLetterBar(QWidget):
             w = table.columnWidth(logical)
             if w <= 0:
                 continue
+            x = hx + hh.sectionViewportPosition(vis)
             rect = QRect(int(x), 0, int(w), self.height())
             # 当前列底色（与主表选中列呼应）
             if vis == cur_visual:
@@ -109,7 +113,6 @@ class ColumnLetterBar(QWidget):
             # 列分隔线
             p.setPen(border)
             p.drawLine(rect.right(), 0, rect.right(), self.height() - 1)
-            x += w
 
         # 底边线
         p.setPen(QColor('#c3ccd8'))
