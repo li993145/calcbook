@@ -42,15 +42,24 @@ LEGACY_DEFAULT_WIDTHS = {'code': 120, 'name': 200, 'part': 130,
 
 
 # ------------------------------------------------------------------
-# V3.9：单元格地址（列字母 + 行号）
+# 单元格地址（列字母 + 行号）
 # ------------------------------------------------------------------
-# 不参与列字母分配的列：序号 / 清单编号 / 项目名称 / 计量单位 / 图纸 / 不计。
-# 这些列是标识与说明性的（清单编号常写成 A2-001 这类），参与引用容易误判；
-# 其余列（工程量、计算公式、备注与全部自定义列）都能写公式、也能被引用。
+# V3.10：完全 WPS 式——所有列按表格里的物理顺序依次分配 A/B/C…，
+# 序号=A、清单编号=B、项目名称=C、计量单位=D、工程量=E、计算公式=F…
+# 标识列（序号/清单编号/项目名称/计量单位/图纸/不计）虽然也有字母、
+# 也能被公式引用（普通数字格按数字取），但不允许在这些列里写公式，
+# 避免「清单编号 A2-001」这类文本被当成公式。
 NON_CALC_COLUMNS = {'seq', 'code', 'name', 'unit', 'img', 'no_count'}
+
+# 工程文件里的列字母方案版本号。1=V3.9 旧方案（工程量固定 A），
+# 2=V3.10 物理列方案；老工程打开时按旧映射迁移公式里的地址。
+COL_LETTER_SCHEME = 2
 
 # 中文（含全角标点）——用于判断一个格子的文本是不是「普通文字」
 _CJK_RE = re.compile(r'[\u4e00-\u9fff\u3000-\u303f\uff00-\uffef]')
+# V3.10：地址后紧跟「-数字」是型号 / 清单编号（A2-001、C30-1），不是公式。
+# 标识列有了字母后，这类文本原来会被 find_cell_refs 命中而误算。
+_MODEL_NO_RE = re.compile(r'\b[A-Za-z]{1,2}\d+\s*[-－]\s*\d')
 
 
 def _col_letters(n):
@@ -69,11 +78,30 @@ def _col_letters(n):
 
 
 def column_letters(columns):
-    """列 key → 单元格地址字母（V3.9）。
+    """列 key → 单元格地址字母（V3.10：完全 WPS 式物理列）。
 
-    * 「工程量」列固定占用字母 A —— 兼容 V3.7.9 的 A<行号>（本分部第 N 行的工程量）；
-    * 其余可计算列（计算公式、备注、全部自定义列）按表格顺序依次取 B、C…
-    * 例：默认 9 列 → 工程量 A、计算公式 B、备注 C；再加一列自定义「单价」→ D
+    表格里的每一列都有字母：第 1 列 A、第 2 列 B…第 27 列 AA。
+    默认 9 列 → 序号 A、清单编号 B、项目名称 C、计量单位 D、
+    工程量 E、计算公式 F、备注 G、图纸 H、不计 I；
+    明细表再加「构件数量」插在工程量后 → 构件数量 F、计算公式 G…
+
+    公式引用与标尺完全一致：点击哪一列，标尺上显示什么字母，
+    公式里就写什么地址。
+    """
+    keys = [str(c.get('key', '')) for c in (columns or [])]
+    letters = _col_letters(len(keys))
+    out = {}
+    for idx, k in enumerate(keys):
+        if k:
+            out[k] = letters[idx] if idx < len(letters) else ''
+    return out
+
+
+def legacy_column_letters(columns):
+    """V3.9 旧方案的列字母映射——仅用于老工程公式迁移。
+
+    旧规则：工程量固定 A，其余可计算列（计算公式/备注/自定义列）
+    按表格顺序依次 B、C…；标识列无字母。
     """
     keys = [str(c.get('key', '')) for c in (columns or [])]
     calc = [k for k in keys if k and k not in NON_CALC_COLUMNS]
@@ -82,11 +110,43 @@ def column_letters(columns):
     for idx, k in enumerate(calc):
         out[k] = letters[idx] if idx < len(letters) else ''
     if 'value' in out and calc and calc[0] != 'value':
-        # 工程量列固定拿 A：原来占 A 的那一列改用工程量列原来的字母
         v_idx = calc.index('value')
         out[calc[0]] = letters[v_idx] if v_idx < len(letters) else ''
         out['value'] = 'A'
     return out
+
+
+def migrate_letter_scheme(proj):
+    """老工程（方案 1）公式里的地址字母 → 新物理列字母。
+
+    逐分部按各自的实际列建立「旧字母 → 新字母」映射，只改公式文本
+    （计算公式列 / 备注 / 自定义列），普通数据和清单编号一律不动。
+    用单元格地址正则整体替换，保证 SUM(A1:A10) 里的两个端点都被迁移。
+    """
+    from .formula import CELL_REF_RE
+    for sec in proj.all_sections():
+        cols = proj.effective_columns(sec)
+        old, new = legacy_column_letters(cols), column_letters(cols)
+        mapping = {}
+        for key, letter in old.items():
+            if letter and new.get(key):
+                mapping[letter] = new[key]
+        if not mapping:
+            continue
+
+        def repl(m):
+            letter = m.group(1).upper()
+            return '%s%s' % (mapping.get(letter, letter), m.group(2))
+
+        def migrate_text(s):
+            return CELL_REF_RE.sub(repl, str(s or ''))
+
+        for row in sec.rows:
+            row.formula = migrate_text(row.formula)
+            row.remark = migrate_text(row.remark)
+            if isinstance(getattr(row, 'custom', None), dict):
+                for k, v in row.custom.items():
+                    row.custom[k] = migrate_text(v)
 
 
 def cell_formula_text(text, addrs=None):
@@ -107,6 +167,8 @@ def cell_formula_text(text, addrs=None):
         # 只写了一个 = 是「还没开始输入」，不当公式，免得单元格误标红
         return (True, body) if body else (False, '')
     if _CJK_RE.search(s):
+        return False, ''
+    if _MODEL_NO_RE.search(s):
         return False, ''
     if not find_cell_refs(s, addrs):
         return False, ''
@@ -413,6 +475,20 @@ class Section:
             yield from c.iter_self_and_desc()
 
 
+def unit_level_section(sec):
+    """sec 所属的单位工程节点（树深度=1）；不在单位工程树下返回 None。
+
+    V4.1 分类汇总「仅当前单位工程的下一级」要用：从选中的节点往上找到
+    单位工程，再只取它的直接下级表，更深层的明细表自然被排除。
+    """
+    s = sec
+    while s is not None and s.depth() > 1:
+        s = s.parent
+    if s is not None and s.parent is not None and s.depth() == 1:
+        return s
+    return None
+
+
 class Project:
     def __init__(self, name="未命名工程"):
         self.name = name
@@ -578,9 +654,15 @@ class Project:
             # V3.9.1：列字母按「本分部实际列」分配——明细子目自己加的
             # 构件数量列只影响本表的 A/B/C 地址，其它分部不受影响。
             letters = column_letters(self.effective_columns(sec))
-            calc_keys = [k for k in letters if letters[k]]
-            # 除工程量列（结果列）外，其余可计算列都能自己写公式
-            other_keys = [k for k in calc_keys if k not in ('value', 'formula')]
+            # V3.10：每一列都有字母（物理列顺序），全部进入引用上下文
+            all_keys = [k for k in letters if letters[k]]
+            # 标识列 + 工程量结果列不能写公式；其它列都能写
+            other_keys = [k for k in all_keys
+                          if k not in NON_CALC_COLUMNS
+                          and k not in ('value', 'formula')]
+            # 标识列虽不能写公式，但格里的普通数字（如序号 1/2/3）
+            # 要能被公式引用，所以照样灌进上下文
+            plain_keys = [k for k in all_keys if k in NON_CALC_COLUMNS]
             f_letter = letters.get('formula', '')
             v_letter = letters.get('value', '')
             rows = sec.rows
@@ -589,11 +671,11 @@ class Project:
                 return
             # 本分部合法的单元格地址（列字母 × 行号）
             addrs = set()
-            for k in calc_keys:
+            for k in all_keys:
                 L = letters[k]
                 for i in range(1, n + 1):
                     addrs.add('%s%d' % (L, i))
-            self.engine.set_refs(addrs, set(letters[k] for k in calc_keys))
+            self.engine.set_refs(addrs, set(letters[k] for k in all_keys))
             # 地址 → 数值（初值 0；求值时按行推进）
             values = dict((a, 0.0) for a in addrs)
 
@@ -644,8 +726,15 @@ class Project:
                             row.cell_calc.pop(k, None)
                         continue
                     # 本行先归零：自己引用自己按 0 处理
-                    for k in calc_keys:
+                    for k in all_keys:
                         values['%s%d' % (letters[k], rno)] = 0.0
+                    # 标识列里的普通数字也进引用上下文；序号列没有存文本，
+                    # 按它显示的行号取值（标尺 A 列 → A1=1、A2=2…）
+                    for k in plain_keys:
+                        num = float(rno) if k == 'seq' else \
+                            plain_cell_number(cell_source_text(row, k))
+                        values['%s%d' % (letters[k], rno)] = \
+                            num if num is not None else 0.0
                     # 1) 计算公式列（结果写进行工程量）
                     row.value, row.cleaned, row.error = self.engine.evaluate(
                         row.formula, context=values, xj_callback=xj)
@@ -686,6 +775,7 @@ class Project:
                     freeze_cols=getattr(self, 'freeze_cols', 0),
                     col_order_v377=getattr(self, 'col_order_v377', False),
                     col_order_v379=getattr(self, 'col_order_v379', False),
+                    col_letter_scheme=COL_LETTER_SCHEME,
                     books=[b.to_dict() for b in self.books],
                     root=self.books[0].to_dict() if self.books else None, version=4)
 
@@ -739,6 +829,13 @@ class Project:
             m = re.match(r'^计算书\s*(\d*)$', (b.name or '').strip())
             if m:
                 b.name = p.level_name(0) + (m.group(1) or '')
+        # V3.10：老工程的公式地址按旧映射（工程量=A）迁移到物理列字母
+        try:
+            scheme = int(d.get('col_letter_scheme', 1) or 1)
+        except (TypeError, ValueError):
+            scheme = 1
+        if scheme < COL_LETTER_SCHEME:
+            migrate_letter_scheme(p)
         p.recalc()
         return p
 

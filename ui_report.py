@@ -38,7 +38,7 @@ V3.8 起：
 
 import re as _re
 
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, QEvent
 from PyQt5.QtGui import QBrush, QColor, QFont, QPen
 from PyQt5.QtWidgets import (
     QAbstractItemView, QAction, QComboBox, QDialog, QDialogButtonBox,
@@ -48,6 +48,7 @@ from PyQt5.QtWidgets import (
 )
 
 from core.units import precision_for_unit, section_precision, fmt_num
+from core.model import unit_level_section
 # V3.7.10：正则口径与「筛选」完全一致（同一套 norm_text + filter_match）
 from ui_sortfilter import filter_match, norm_text
 
@@ -148,6 +149,12 @@ class ReportViewerDialog(QDialog):
         self.win = win
         self.setWindowTitle('查看报表')
         self.setMinimumSize(960, 600)
+        # V4.3：系统标题栏也要有最小化 / 最大化（还原）按钮
+        try:
+            self.setWindowFlags(self.windowFlags() | Qt.WindowMinimizeButtonHint |
+                                Qt.WindowMaximizeButtonHint)
+        except Exception:
+            pass
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(8, 8, 8, 8)
@@ -263,6 +270,15 @@ class ReportViewerDialog(QDialog):
         bar.addWidget(self.btn_print)
         bar.addWidget(self.btn_export)
         bar.addWidget(self.btn_page)
+        # V4.3：窗口控制——最大化后必须有按钮能还原，否则回不到主窗口
+        self.btn_max = QPushButton('最大化')
+        self.btn_max.setToolTip('报表窗口占满屏幕；再点一次还原')
+        self.btn_max.clicked.connect(self.toggle_max)
+        bar.addWidget(self.btn_max)
+        self.btn_back = QPushButton('返回主窗口')
+        self.btn_back.setToolTip('关掉本窗口并回到主界面（左侧导航与功能区都能用了）')
+        self.btn_back.clicked.connect(self.back_to_main)
+        bar.addWidget(self.btn_back)
         bar.addStretch(1)
         bb = QDialogButtonBox(QDialogButtonBox.Close)
         bb.button(QDialogButtonBox.Close).setText('关闭')
@@ -276,6 +292,40 @@ class ReportViewerDialog(QDialog):
         self._fill_scope_boxes()
         self.refresh()
         self._fit_to_editor()
+
+    # ---------------- 窗口控制（V4.3） ----------------
+    def toggle_max(self):
+        """最大化 / 还原报表窗口。"""
+        try:
+            if self.isMaximized():
+                self.showNormal()
+            else:
+                self.showMaximized()
+        except Exception:
+            pass
+        self._sync_max_btn()
+
+    def _sync_max_btn(self):
+        try:
+            mx = self.isMaximized()
+            self.btn_max.setText('还原' if mx else '最大化')
+        except Exception:
+            pass
+
+    def changeEvent(self, ev):
+        super().changeEvent(ev)
+        if ev.type() == QEvent.WindowStateChange:
+            self._sync_max_btn()
+
+    def back_to_main(self):
+        """回到主窗口：关掉报表窗并把主窗口顶到前面。"""
+        self.hide()
+        try:
+            self.win.showNormal()
+            self.win.raise_()
+            self.win.activateWindow()
+        except Exception:
+            pass
 
     # ---------------- 范围选择 ----------------
     def _fill_scope_boxes(self):
@@ -367,6 +417,14 @@ class ReportViewerDialog(QDialog):
 
     def _scope_rows(self):
         """当前范围（计算书 × 层级）内的全部数据行（跳过合计行）。"""
+        if getattr(self.win, 'summary_scope_unit_next', lambda: False)():
+            # V4.1：分类汇总弹窗勾了「单位工程下一级」时，报表的分类汇总
+            # 也只看当前单位工程的直接下级表，更深层明细表不参与。
+            unit = unit_level_section(getattr(self.win, 'current_section', None))
+            rows = []
+            for node in (list(unit.children) if unit is not None else []):
+                rows.extend(node.rows)
+            return [r for r in rows if not getattr(r, 'total_row', False)]
         books = self._selected_books()
         level = self.cb_level.currentData()
         rows = []

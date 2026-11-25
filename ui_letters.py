@@ -1,9 +1,12 @@
 # -*- coding: utf-8 -*-
 """WPS 式列字母标尺：在表格水平表头上方显示 A/B/C… 列字母。
 
-字母与公式引用一致（见 core.model.column_letters）：
-工程量=A、构件数量=B、计算公式=C、备注=D、自定义列依次 E、F…
-序号/编号/项目名称/计量单位/图纸/不计 是标识列，不参与引用，留空。
+V3.10 起完全按物理列顺序：序号=A、清单编号=B、项目名称=C、
+计量单位=D、工程量=E、计算公式=F…每一列都有字母，与公式引用
+地址完全一致（见 core.model.column_letters）。
+
+标识列（序号/编号/项目名称/单位/图纸/不计）的字母显示为灰色——
+它们能作为地址被公式引用（普通数字格按数字取），但列里不能写公式。
 
 标尺与主表列宽、列拖动、水平滚动完全同步；点击字母可选中整列。
 """
@@ -19,8 +22,8 @@ class ColumnLetterBar(QWidget):
         self.win = win
         self.setFixedHeight(24)
         self.setMouseTracking(True)
-        self.setToolTip('列字母标尺：与公式引用一致（工程量=A、构件数量=B、计算公式=C…）；'
-                        '点击字母选中整列')
+        self.setToolTip('列字母标尺：按物理列从 A 开始（序号=A、工程量=E、计算公式=F…），'
+                        '与公式引用地址一致；灰色列不能写公式。点击字母选中整列')
 
         table = self.win.table
         hh = table.horizontalHeader()
@@ -44,17 +47,19 @@ class ColumnLetterBar(QWidget):
             return {}
 
     def _column_at_x(self, x):
-        """返回鼠标 x 处的逻辑列号（考虑水平滚动与列拖动），不在任何列上返回 -1。"""
+        """返回鼠标 x 处的逻辑列号（考虑水平滚动与列拖动），不在任何列上返回 -1。
+
+        与绘制用同一套 sectionViewportPosition() 坐标——绝不能用
+        horizontalScrollBar().value() 当像素偏移（它的单位是「列」）。
+        """
         table = self.win.table
         hh = table.horizontalHeader()
-        left = -table.horizontalScrollBar().value()
-        cx = x
         for vis in range(hh.count()):
             logical = hh.logicalIndex(vis)
-            w = table.columnWidth(logical)
-            if left <= cx < left + w:
+            start = hh.x() + hh.sectionViewportPosition(vis)
+            end = start + table.columnWidth(logical)
+            if start <= x < end:
                 return logical
-            left += w
         return -1
 
     # ---------- 交互 ----------
@@ -105,10 +110,13 @@ class ColumnLetterBar(QWidget):
             # 当前列底色（与主表选中列呼应）
             if vis == cur_visual:
                 p.fillRect(rect, QColor('#dce9f7'))
-            # 可计算列显示引用字母；标识列留空
+            # 每一列都显示引用字母；标识列用灰色（能引用但不能写公式）
             letter = letters.get(cols[logical]['key'], '')
             if letter:
-                p.setPen(QColor('#305080'))
+                key = str(cols[logical].get('key', ''))
+                from core.model import NON_CALC_COLUMNS
+                p.setPen(QColor('#8a99ab') if key in NON_CALC_COLUMNS
+                         else QColor('#305080'))
                 p.drawText(rect, Qt.AlignCenter, letter)
             # 列分隔线
             p.setPen(border)

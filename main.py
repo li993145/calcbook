@@ -25,8 +25,8 @@ from PyQt5.QtGui import (QFont, QFontMetrics, QFontDatabase, QColor, QKeySequenc
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
 from core.model import (Project, Section, Row, DEFAULT_LEVELS, new_id,
-                        column_letters, cell_display_text, cell_source_text,
-                        cell_formula_text)
+                        column_letters, unit_level_section, cell_display_text,
+                        cell_source_text, cell_formula_text, NON_CALC_COLUMNS)
 from core.exporter import export_xlsx
 from core.units import (UNIT_LIST, UNIT_GROUPS, INTEGER_UNITS, REBAR_CONSTANTS,
                         precision_for_unit, section_precision, fmt_const, fmt_num)
@@ -43,11 +43,13 @@ from ui_drawing import (encode_img, decode_img, capture_region, img_size,
 APP_NAME = "工程量计算书"
 # 本表内部复制/剪切的结构化剪贴板格式（多行整行复制 → 粘到任意位置插入行，不覆盖已有数据）
 CB_ROWS_MIME = 'application/x-calcbook-rows'
-APP_VER = "3.9.3"
+APP_VER = "5.0"
 FILE_EXT = '.gcls'          # 工程文件后缀（内容仍是 JSON，便于排查与迁移）
 # V3.7.3：表格最大行列数与 WPS 表格一致（1048576 行 × 16384 列）
 MAX_ROWS = 1048576
 MAX_COLS = 16384
+# V4.1：一次拖动填充最多自动追加的行数（防止拖到屏幕外时生成海量空行）
+MAX_FILL_NEW_ROWS = 500
 # V3.6.1：备份默认放到固定目录，不再跟随工程文件所在目录；启动时自动创建。
 DEFAULT_BACKUP_DIR = r'D:\手算工程量计算书\bak'
 
@@ -586,25 +588,85 @@ class PasteTableWidget(QTableWidget):
         return QRect(hr.x() - 5, hr.y() - 5, hr.width() + 10,
                      hr.height() + 10).contains(pos)
 
+    def _row_below_last(self, pos):
+        """pos 落在最后一行下面时估算它对应的“虚拟行号”，否则返回 -1。
+
+        QTableView 对超出 rowCount 的位置 indexAt() 是无效的，以前拖动填充
+        柄到表格末尾下方就直接没反应；这里按行高把下面的空白区折算成行号，
+        松手时由 MainWindow.apply_fill_drag 真正把行追加进模型。
+        """
+        if self.rowCount() <= 0 or pos.y() < 0 or self.columnAt(pos.x()) < 0:
+            return -1
+        last = self.rowCount() - 1
+        br = self.visualRect(self.model().index(last, 0))
+        if br.width() <= 0 or pos.y() <= br.bottom():
+            return -1
+        rh = max(1, self.rowHeight(last))
+        extra = int((pos.y() - br.bottom()) / rh) + 1
+        return last + extra
+
+    def _grow_fill_rows(self, chunk=10):
+        """拖动填充时表格铺满可视区：在视图末尾临时长出新行。
+
+        只改视图的 rowCount；模型里的行在松手时由 apply_fill_drag 一次性追加。
+        取消拖动时 mouseReleaseEvent 会把行数还原。
+        """
+        if self._fill_drag is None:
+            return False
+        base = getattr(self, '_fill_orig_rows', self.rowCount())
+        limit = min(base + MAX_FILL_NEW_ROWS, MAX_ROWS)
+        if self.rowCount() >= limit:
+            return False
+        self.setRowCount(min(self.rowCount() + chunk, limit))
+        self.scrollToBottom()
+        return True
+
+    def _cell_rect(self, row, col):
+        """单元格矩形；row 超出当前行数时按行高外推，供填充预览使用。"""
+        if 0 <= row < self.rowCount() and 0 <= col < self.columnCount():
+            r = self.visualRect(self.model().index(row, col))
+            if r.width() > 0 and r.height() > 0:
+                return r
+        last = max(0, self.rowCount() - 1)
+        ref = self.visualRect(self.model().index(last, col))
+        if ref.width() <= 0:
+            return QRect()
+        rh = max(1, self.rowHeight(last))
+        top = ref.bottom() + 1 + (row - last - 1) * rh
+        return QRect(ref.left(), top, ref.width(), rh)
+
     def _extend_target(self, pos):
         """根据拖动位置算填充目标 rect（不含源区）。方向按位移大小自动判。"""
         src = self._fill_drag['src']
         r0, r1, c0, c1 = src
         idx = self.indexAt(pos)
-        if not idx.isValid():
-            return None
-        tr, tc = idx.row(), idx.column()
+        tr, tc = (idx.row(), idx.column()) if idx.isValid() else (-1, -1)
+        if tr < 0:
+            tr = self._row_below_last(pos)      # 越过末尾：虚拟行，松手后自动加行
         sp = self._fill_drag['start']
         dx, dy = pos.x() - sp.x(), pos.y() - sp.y()
         if abs(dy) >= abs(dx):
             if dy >= 0:
+                # 表格铺满窗口、鼠标贴在底边时没有空白区可拖：临时长行并滚动，
+                # 这样可以一直往下拖（V4.1）。
+                if pos.y() >= self.viewport().height() - 16 and \
+                        tr >= self.rowCount() - 1 and self._grow_fill_rows():
+                    idx = self.indexAt(pos)
+                    tr, tc = (idx.row(), idx.column()) if idx.isValid() else (-1, -1)
+                    if tr < 0:
+                        tr = self._row_below_last(pos)
                 if tr <= r1:
                     return None
-                return (r1 + 1, tr, c0, c1)          # 向下
+                base = getattr(self, '_fill_orig_rows', self.rowCount())
+                tr = min(tr, r1 + MAX_FILL_NEW_ROWS,
+                         base + MAX_FILL_NEW_ROWS - 1)
+                return (r1 + 1, tr, c0, c1)          # 向下（可越过末尾）
             if tr >= r0:
                 return None
             return (tr, r0 - 1, c0, c1)              # 向上
         else:
+            if tc < 0:
+                return None
             if dx >= 0:
                 if tc <= c1:
                     return None
@@ -632,8 +694,8 @@ class PasteTableWidget(QTableWidget):
         if not tgt:
             return None
         u = self._union(self._fill_drag['src'], tgt)
-        tl = self.visualRect(self.model().index(u[0], u[2]))
-        br = self.visualRect(self.model().index(u[1], u[3]))
+        tl = self._cell_rect(u[0], u[2])
+        br = self._cell_rect(u[1], u[3])
         if tl.width() <= 0 or br.width() <= 0:
             return None
         # adjusted 的右/下增量是相对「边的位置」加的，必须用
@@ -665,6 +727,7 @@ class PasteTableWidget(QTableWidget):
                 rect = self.sel_rect()
                 if rect is not None:
                     self._fill_drag = {'src': rect, 'start': pos, 'tgt': None}
+                    self._fill_orig_rows = self.rowCount()
                     event.accept()
                     return
         super().mousePressEvent(event)
@@ -697,6 +760,10 @@ class PasteTableWidget(QTableWidget):
             drag, self._fill_drag = self._fill_drag, None
             self.viewport().update()
             tgt = drag.get('tgt')
+            orig = getattr(self, '_fill_orig_rows', None)
+            if tgt is None and orig is not None:
+                self.setRowCount(orig)      # 取消：撤销拖动时长出的临时行
+            self._fill_orig_rows = None
             if tgt is not None and self.on_fill_apply:
                 self.on_fill_apply(drag['src'], tgt)
             event.accept()
@@ -722,8 +789,8 @@ class PasteTableWidget(QTableWidget):
             src = self._fill_drag['src']
             tgt = self._fill_drag.get('tgt')
             if tgt:
-                tl = self.visualRect(self.model().index(tgt[0], tgt[2]))
-                br = self.visualRect(self.model().index(tgt[1], tgt[3]))
+                tl = self._cell_rect(tgt[0], tgt[2])
+                br = self._cell_rect(tgt[1], tgt[3])
                 if tl.width() > 0 and br.width() > 0:
                     area = tl.adjusted(0, 0, br.right() - tl.right(),
                                        br.bottom() - tl.bottom())
@@ -1626,9 +1693,115 @@ class FoldStrip(QFrame):
         self.btn_open.setEnabled(bool(folded))
 
 
+class NavStrip(QFrame):
+    """工作区左缘的常驻窄条：左侧导航栏的显示 / 收起开关。
+
+    V4.4：原来唯一的“展开导航”按钮放在公式辅助栏顶部的快捷链接行里，
+    而单位工程汇总视图（以及任何隐藏公式辅助栏的场合）会把整条公式栏隐藏，
+    导航一旦收起就没法再打开——用户表现为“窗口最大化后找不到导航栏”。
+    这里把开关固定在工作区左缘：任何视图、任何窗口大小都在同一个位置。
+    """
+
+    def __init__(self, on_toggle, parent=None):
+        super().__init__(parent)
+        self.setObjectName('navStrip')
+        self.setFixedWidth(19)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 2, 0, 0)
+        lay.setSpacing(2)
+        self.btn = QToolButton(self)
+        self.btn.setFixedSize(17, 24)
+        self.btn.setCursor(Qt.PointingHandCursor)
+        self.btn.setAutoRaise(True)
+        self.btn.setStyleSheet(
+            'QToolButton { border:1px solid #c9d6e3; border-radius:2px; background:#ffffff;'
+            ' color:#3c6b9c; font-size:9pt; padding:0; }'
+            ' QToolButton:hover { background:#dceafa; border-color:#8fb3d6; }'
+            ' QToolButton:pressed { background:#c9dcf2; }')
+        self.btn.clicked.connect(lambda checked=False: on_toggle())
+        lay.addWidget(self.btn)
+        lay.addStretch(1)
+        self.setStyleSheet('#navStrip { background:#f7f9fb; border-right:1px solid #e0e6ee; }')
+        self.set_state(False)
+
+    def set_state(self, folded):
+        """folded=True 表示导航已收起，按钮变成“展开”。"""
+        self.btn.setText('▶' if folded else '◀')
+        self.btn.setToolTip('展开左侧导航栏（项目结构）' if folded
+                            else '收起左侧导航栏（工作区变宽）')
+
+
 def natural_key(text):
     """编号排序用的自然序（2 排在 10 前面）。"""
     return [int(t) if t.isdigit() else t for t in re.split(r'(\d+)', str(text or ''))]
+
+
+def sort_text_key(text):
+    """文本 → 可安全比较的排序键（数字段按数值、其余按文字，类型统一）。
+
+    natural_key 返回的是 [str, int, str] 这种混合列表，两个这样的列表直接比
+    会报 TypeError（int 和 str 不能比）——汇总表要同时比多个字段，所以这里
+    把每一段统一转成 (类型标记, 数值, 文本) 三元组。
+    """
+    out = []
+    for p in natural_key(str(text or '')):
+        if isinstance(p, int):
+            out.append((0, p, ''))
+        else:
+            out.append((1, 0, str(p)))
+    return tuple(out)
+
+
+def summary_sort_key(fields, keys, sec_index, value):
+    """汇总表的排序键（分类汇总 / 单位工程汇总共用）。
+
+    V5.0：分组字段里只要带了「分部」，就以分部为首要排序键——分部按它在树里
+    的先后排列（1罐基 → 2火车卸车泵棚 → 3防火堤隔堤），同一分部的组连成一整块，
+    块内再按其余字段自然序、最后按合计降序。
+    以前一律按合计降序排，同一分部被拆得到处都是（用户体感：分部的汇总量是乱的）。
+    没有「分部」维度时维持原样：按字段自然序、合计降序。
+    """
+    idxs = list(range(len(fields)))
+    head = 0
+    if 'section' in fields:
+        i = fields.index('section')
+        name = keys[i] if i < len(keys) else ''
+        head = sec_index.get(name, len(sec_index) + 1)
+        idxs.remove(i)
+    parts = [head]
+    for j in idxs:
+        parts.append(sort_text_key(keys[j] if j < len(keys) else ''))
+    parts.append(-float(value or 0))
+    return tuple(parts)
+
+
+def match_filters(text_of, filters, match_all=True):
+    """按筛选条件判断某一行是否参与汇总（分类汇总 / 单位工程汇总共用）。
+
+    text_of(field) -> 该行在指定字段上的显示值；
+    filters 为 (字段, 关系, 值) 列表，关系见 MultiSummaryDialog.OPS；
+    多条条件按 match_all 决定「全部满足(AND)」还是「任一满足(OR)」。
+    """
+    if not filters:
+        return True
+    results = []
+    for field, op, value in filters:
+        text = text_of(field)
+        val = (value or '').strip()
+        if op == 'contains':
+            ok = bool(val) and val in text
+        elif op == 'not_contains':
+            ok = not val or val not in text
+        elif op == 'eq':
+            ok = text == val
+        elif op == 'ne':
+            ok = text != val
+        elif op == 'empty':
+            ok = (not text) or text.startswith('（无')
+        else:                       # not_empty
+            ok = bool(text) and not text.startswith('（无')
+        results.append(ok)
+    return all(results) if match_all else any(results)
 
 
 class SummaryPanel(QFrame):
@@ -1709,7 +1882,8 @@ class SummaryPanel(QFrame):
         self.btn_clear_multi.setToolTip('清除多条件，恢复按上方方式汇总')
         self.btn_clear_multi.setStyleSheet('QPushButton { padding:3px 6px; font-size:9pt; }')
         self.btn_clear_multi.setVisible(False)
-        self.btn_clear_multi.clicked.connect(self.clear_multi)
+        # clicked 会带 checked(bool) 参数，直接连会把它当 refresh 传进去（点了不刷新）
+        self.btn_clear_multi.clicked.connect(lambda _c=False: self.clear_multi())
         mode_row.addWidget(self.btn_clear_multi)
         v.addLayout(mode_row)
         self.multi = None                 # None=单条件；dict=多字段/多筛选
@@ -1717,6 +1891,12 @@ class SummaryPanel(QFrame):
         self.only_cur = QCheckBox('仅当前分部（含下级）')
         self.only_cur.setToolTip('勾选后只汇总左侧选中的分部；不勾选汇总全部计算书')
         v.addWidget(self.only_cur)
+        # V4.1：单位工程汇总下一级——只取当前单位工程的直接下级表，
+        # 更深层的明细表自动排除；分组列仍按上方"按XX"的选择。
+        self.only_next = QCheckBox('仅当前单位工程的下一级（排除明细表）')
+        self.only_next.setToolTip('选中单位工程（或其下级表）时，只汇总它的直接下级计算书；'
+                                  '更深层的明细表不参与，分组按上方设定的列名')
+        v.addWidget(self.only_next)
 
         self.table = QTableWidget(0, 4)
         self.table.setHorizontalHeaderLabels(['分类', '单位', '合计', '行数'])
@@ -1759,7 +1939,8 @@ class SummaryPanel(QFrame):
         v.addLayout(bar)
 
         self.mode.currentIndexChanged.connect(lambda _i: self.clear_multi())
-        self.only_cur.stateChanged.connect(lambda _s: self.refresh())
+        self.only_cur.stateChanged.connect(lambda _s: self._scope_changed('cur'))
+        self.only_next.stateChanged.connect(lambda _s: self._scope_changed('next'))
 
     # ---------------- 汇总表的行列操作（与工作区表格一致） ----------------
     def _setup_table_ops(self):
@@ -1916,6 +2097,16 @@ class SummaryPanel(QFrame):
         self.copy_selection()
 
     # ---------------- 汇总 ----------------
+    def _scope_changed(self, which):
+        """两个范围选项互斥，避免叠加后口径看不懂。"""
+        if which == 'cur' and self.only_cur.isChecked() and self.only_next.isChecked():
+            self.only_next.setChecked(False)
+            return
+        if which == 'next' and self.only_next.isChecked() and self.only_cur.isChecked():
+            self.only_cur.setChecked(False)
+            return
+        self.refresh()
+
     def mode_key(self):
         return self.mode.currentData() or 'code'
 
@@ -1960,24 +2151,8 @@ class SummaryPanel(QFrame):
         multi = self.multi
         if not multi or not multi.get('filters'):
             return True
-        results = []
-        for field, op, value in multi['filters']:
-            text = self.row_field(row, section, field)
-            val = (value or '').strip()
-            if op == 'contains':
-                ok = bool(val) and val in text
-            elif op == 'not_contains':
-                ok = not val or val not in text
-            elif op == 'eq':
-                ok = text == val
-            elif op == 'ne':
-                ok = text != val
-            elif op == 'empty':
-                ok = not text or text.startswith('（无')
-            else:                       # not_empty
-                ok = bool(text) and not text.startswith('（无')
-            results.append(ok)
-        return all(results) if multi.get('match_all', True) else any(results)
+        return match_filters(lambda f: self.row_field(row, section, f),
+                             multi['filters'], multi.get('match_all', True))
 
     def open_multi_dialog(self):
         dlg = MultiSummaryDialog(self, self.multi)
@@ -2006,7 +2181,10 @@ class SummaryPanel(QFrame):
         if proj is None:
             return []
         sec = getattr(self.win, 'current_section', None)
-        if self.only_cur.isChecked() and sec is not None:
+        if self.only_next.isChecked() and sec is not None:
+            unit = unit_level_section(sec)
+            sections = list(unit.children) if unit is not None else []
+        elif self.only_cur.isChecked() and sec is not None:
             sections = list(sec.iter_self_and_desc())
         else:
             sections = proj.all_sections()
@@ -2025,10 +2203,9 @@ class SummaryPanel(QFrame):
                 g[0] += float(r.value)
                 g[1] += 1
         rows = [(k, u, v[0], v[1]) for (k, u), v in groups.items()]
-        if fields == ['code'] and not self.multi:
-            rows.sort(key=lambda t: natural_key(t[0][0]))
-        else:
-            rows.sort(key=lambda t: (-t[2], natural_key(t[0][0]) if t[0] else ''))
+        # V5.0：分组里带「分部」时，分部按树顺序排在最前，同分部的组连成一块
+        sec_index = {s.name: i for i, s in enumerate(sections)}
+        rows.sort(key=lambda t: summary_sort_key(fields, t[0], sec_index, t[2]))
         return rows
 
     def refresh(self):
@@ -2094,6 +2271,10 @@ class SummaryPanel(QFrame):
                     it.setTextAlignment(Qt.AlignCenter)
                 self.table.setItem(r, j, it)
         self.lbl_info.setText('%d 项 / %d 行' % (len(rows), cnt))
+        if not rows and self.only_next.isChecked():
+            u = unit_level_section(getattr(self.win, 'current_section', None))
+            if u is None:
+                self.lbl_info.setText('请先选中单位工程节点或其下级表')
         # 行高默认自适应；列宽只在第一次有数据时自适应（之后保留用户手动拖的宽度）
         if rows:
             self.fit_rows()
@@ -2202,11 +2383,445 @@ class SummaryPanel(QFrame):
 
 
 
+class UnitSummaryWidget(QWidget):
+    """单位工程工作区：把该单位工程直接下级表的汇总当成一张表来看。
+
+    V4.2：选中单位工程节点时替换主表格，第一列自动编号；分组列沿用
+    「分类汇总」里设定的列名，导出 / 复制 / 打印都针对这张汇总表。
+    """
+
+    def __init__(self, win, parent=None):
+        super().__init__(parent)
+        self.win = win
+        self._matrix = []
+        self._groups = []
+        self._col_widths = {}
+        self.multi = None                 # None=单条件；dict=多字段/多筛选（V4.3）
+
+        v = QVBoxLayout(self)
+        v.setContentsMargins(2, 2, 2, 2)
+        v.setSpacing(3)
+        bar = QHBoxLayout()
+        bar.setSpacing(4)
+        bar.addWidget(QLabel('汇总方式：'))
+        self.cb_group = QComboBox()
+        self.cb_group.setToolTip('按哪一列把下级计算结果分组（与分类汇总窗口同一口径）')
+        self._fill_group_choices()
+        self.cb_group.currentIndexChanged.connect(self._on_group_changed)
+        bar.addWidget(self.cb_group, 1)
+        self.btn_multi = QPushButton('多条件…')
+        self.btn_multi.setToolTip('多个分组字段（可含自定义列）+ 多条筛选条件')
+        self.btn_multi.setStyleSheet('QPushButton { padding:3px 6px; font-size:9pt; }')
+        self.btn_multi.clicked.connect(self.open_multi_dialog)
+        bar.addWidget(self.btn_multi)
+        self.btn_clear_multi = QPushButton('单条件')
+        self.btn_clear_multi.setToolTip('清除多条件，恢复按左侧下拉单列汇总')
+        self.btn_clear_multi.setStyleSheet('QPushButton { padding:3px 6px; font-size:9pt; }')
+        self.btn_clear_multi.setVisible(False)
+        # clicked 带 checked(bool) 参数，不能直接连 clear_multi（否则 refresh=False）
+        self.btn_clear_multi.clicked.connect(lambda _c=False: self.clear_multi())
+        bar.addWidget(self.btn_clear_multi)
+        b_exp = QPushButton('导出表格')
+        b_exp.setToolTip('把当前单位工程汇总表导出为 Excel')
+        b_exp.clicked.connect(self.export_excel)
+        b_cp = QPushButton('复制')
+        b_cp.setToolTip('复制整张汇总表（可直接粘到 WPS / Excel）')
+        b_cp.clicked.connect(self.copy_to_clipboard)
+        b_pv = QPushButton('打印预览')
+        b_pv.clicked.connect(self.print_preview)
+        b_pr = QPushButton('打印…')
+        b_pr.clicked.connect(self.print_)
+        for b in (b_exp, b_cp, b_pv, b_pr):
+            b.setStyleSheet('QPushButton { padding:3px 7px; font-size:9pt; }')
+            bar.addWidget(b)
+        v.addLayout(bar)
+
+        self.table = QTableWidget(0, 1)
+        self.table.verticalHeader().setVisible(False)
+        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectItems)
+        self.table.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.table.setAlternatingRowColors(True)
+        self.table.setWordWrap(False)
+        self.table.setStyleSheet('QTableWidget::item { padding:2px 4px; }')
+        self.table.horizontalHeader().setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table.horizontalHeader().sectionResized.connect(self._on_col_resized)
+        v.addWidget(self.table, 1)
+        self.lbl = QLabel('')
+        self.lbl.setStyleSheet('color:#666; font-size:9pt;')
+        v.addWidget(self.lbl)
+
+    # ---------------- 数据 ----------------
+    def _fill_group_choices(self):
+        keep = self.cb_group.currentData() if hasattr(self, 'cb_group') else None
+        self.cb_group.blockSignals(True)
+        self.cb_group.clear()
+        for key, label in SummaryPanel.MODES:
+            self.cb_group.addItem(label.replace('按', ''), key)
+        seen = set(str(self.cb_group.itemData(i))
+                   for i in range(self.cb_group.count()))
+        for cd in (getattr(self.win.project, 'all_columns', lambda: [])() or []):
+            key = str(cd.get('key', ''))
+            if not key or cd.get('builtin') or key in seen:
+                continue
+            self.cb_group.addItem(str(cd.get('title', '列')), key)
+            seen.add(key)
+        if keep:
+            idx = self.cb_group.findData(keep)
+            if idx >= 0:
+                self.cb_group.setCurrentIndex(idx)
+        elif self.cb_group.findData('section') >= 0:
+            self.cb_group.setCurrentIndex(self.cb_group.findData('section'))
+        self.cb_group.blockSignals(False)
+
+    def group_key(self):
+        return self.cb_group.currentData() or 'section'
+
+    def mode_key(self):
+        """与分类汇总面板同名方法：多条件对话框用它取默认分组字段。"""
+        return self.group_key()
+
+    # ---------------- 分组字段 / 多条件（V4.3） ----------------
+    def field_choices(self):
+        """可选的分组字段：内置 5 项 + 项目自定义列。"""
+        out = [(key, label.replace('按', '')) for key, label in SummaryPanel.MODES]
+        seen = set(k for k, _l in out)
+        for cd in (getattr(self.win.project, 'all_columns', lambda: [])() or []):
+            key = str(cd.get('key', ''))
+            if not key or cd.get('builtin') or key in seen:
+                continue
+            out.append((key, str(cd.get('title', '列'))))
+            seen.add(key)
+        return out
+
+    def field_label(self, key):
+        for k, label in self.field_choices():
+            if k == key:
+                return label
+        return SummaryPanel.MODE_COL.get(key, key)
+
+    def group_fields(self):
+        """当前分组字段列表：单条件 1 个，多条件可多个。"""
+        if self.multi:
+            return [f for f in (self.multi.get('fields') or []) if f]
+        return [self.group_key()]
+
+    def group_label(self):
+        """当前汇总方式的名称（多条件时为「多条件（…）」）。"""
+        if self.multi:
+            names = [self.field_label(f) for f in self.group_fields()]
+            label = '多条件（%s）' % '+'.join(names)
+            if self.multi.get('filters'):
+                label += '·%d筛选' % len(self.multi['filters'])
+            return label
+        return self.cb_group.currentText()
+
+    def show_unit_col(self):
+        """单位已作为分组字段时就不再单列「单位」列。"""
+        return 'unit' not in self.group_fields()
+
+    def _on_group_changed(self, _i):
+        """下拉换列 = 放弃多条件（与分类汇总面板口径一致）。"""
+        if self.multi:
+            self.clear_multi(refresh=False)
+        self.refresh()
+
+    def open_multi_dialog(self):
+        dlg = MultiSummaryDialog(self, self.multi, fields=self.field_choices())
+        if dlg.exec_() != QDialog.Accepted:
+            return
+        cfg = dlg.config()
+        if cfg is None:
+            return
+        self.multi = cfg
+        self.btn_clear_multi.setVisible(True)
+        self.btn_multi.setText('多条件✓')
+        self.refresh()
+
+    def clear_multi(self, refresh=True):
+        """恢复单列汇总。"""
+        if self.multi:
+            self.multi = None
+            self.btn_clear_multi.setVisible(False)
+            self.btn_multi.setText('多条件…')
+        if refresh:
+            self.refresh()
+
+    def pass_filters(self, row, sec):
+        """多条件筛选：字段取值与分组一致（含自定义列）。"""
+        multi = self.multi
+        if not multi or not multi.get('filters'):
+            return True
+        return match_filters(lambda f: self._field_text(row, sec, f),
+                             multi['filters'], multi.get('match_all', True))
+
+    @staticmethod
+    def _field_text(row, sec, key):
+        if key in ('code', 'name', 'part', 'unit', 'remark', 'formula', 'section'):
+            return SummaryPanel.row_field(row, sec, key)
+        v = (getattr(row, 'custom', {}) or {}).get(key, '')
+        return str(v).strip() or '（空）'
+
+    def collect(self):
+        """当前单位工程的直接下级表数据，按设定列（或多条件）分组（明细表不参与）。"""
+        sec = getattr(self.win, 'current_section', None)
+        unit = unit_level_section(sec)
+        if unit is None or sec is not unit:
+            return []
+        fields = self.group_fields()
+        show_unit = self.show_unit_col()
+        groups = {}
+        for s in unit.children:
+            for r in s.rows:
+                if (getattr(r, 'total_row', False) or getattr(r, 'no_count', False)
+                        or r.value is None):
+                    continue
+                if not self.pass_filters(r, s):
+                    continue
+                u = (getattr(r, 'unit', '') or '').strip()
+                keys = tuple(self._field_text(r, s, f) for f in fields)
+                g = groups.setdefault((keys, u if show_unit else ''), [0.0, 0])
+                g[0] += float(r.value)
+                g[1] += 1
+        rows = [(k, u, val, n) for (k, u), val_n in groups.items()
+                for val, n in [val_n]]
+        # V5.0：分组里带「分部」时，分部按树顺序排在最前，同分部的组连成一块
+        #        （以前一律按合计降序，同一分部被拆得到处都是，看着"汇总量是乱的"）
+        sec_index = {s.name: i for i, s in enumerate(unit.children)}
+        rows.sort(key=lambda t: summary_sort_key(fields, t[0], sec_index, t[2]))
+        return rows
+
+    def headers(self):
+        heads = ['序号'] + [self.field_label(f) for f in self.group_fields()]
+        if self.show_unit_col():
+            heads.append('单位')
+        heads += ['合计', '行数']
+        return heads
+
+    def as_matrix(self):
+        """含表头与合计行的完整矩阵（导出 / 复制 / 打印共用）。"""
+        data = [self.headers()]
+        show_unit = self.show_unit_col()
+        nkeys = len(self.group_fields())
+        prec = getattr(self.win, 'precision', 3)
+        total = 0.0
+        cnt = 0
+        for i, (keys, u, val, n) in enumerate(self._groups, 1):
+            cells = [i] + list(keys)
+            if show_unit:
+                cells.append(u)
+            cells += [fmt_num(val, precision_for_unit(u, prec)), n]
+            data.append(cells)
+            total += val
+            cnt += n
+        if self._groups:
+            units = set(u for _k, u, _v, _n in self._groups if u)
+            unit = next(iter(units)) if len(units) == 1 else ''
+            cells = ['合计'] + [''] * nkeys
+            if show_unit:
+                cells.append('')
+            cells += ['—' if len(units) > 1 else fmt_num(total, precision_for_unit(unit, prec)),
+                      cnt]
+            data.append(cells)
+        return data
+
+    # ---------------- 显示 ----------------
+    def refresh(self):
+        self._fill_group_choices()
+        self._groups = self.collect()
+        matrix = self.as_matrix()
+        self._matrix = matrix
+        heads = matrix[0]
+        self.table.setColumnCount(len(heads))
+        self.table.setHorizontalHeaderLabels(heads)
+        hh = self.table.horizontalHeader()
+        nkeys = len(self.group_fields())
+        defaults = [58] + [170] * nkeys + ([70] if self.show_unit_col() else []) + [110, 60]
+        for c in range(len(heads)):
+            hh.setSectionResizeMode(c, QHeaderView.Interactive)
+            if heads[c] in self._col_widths:
+                self.table.setColumnWidth(c, int(self._col_widths[heads[c]]))
+            else:
+                self.table.setColumnWidth(c, defaults[c] if c < len(defaults) else 100)
+        self.table.setRowCount(0)
+        for ri, cells in enumerate(matrix[1:]):
+            r = self.table.rowCount()
+            self.table.insertRow(r)
+            is_total = bool(self._groups) and ri == len(self._groups)
+            for ci, text in enumerate(cells):
+                it = QTableWidgetItem(str(text))
+                if ci == 0:
+                    it.setTextAlignment(Qt.AlignCenter)
+                elif ci == len(heads) - 2:
+                    it.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                elif ci == len(heads) - 1:
+                    it.setTextAlignment(Qt.AlignCenter)
+                if is_total:
+                    it.setFont(QFont('微软雅黑', 9, QFont.Bold))
+                    it.setBackground(QBrush(QColor('#f5e6a8')))
+                    it.setToolTip('不同单位不能直接相加' if str(cells[-2]) == '—' else '')
+                self.table.setItem(r, ci, it)
+        sec = getattr(self.win, 'current_section', None)
+        self.lbl.setText('%s：%s，%d 项 / %d 行（仅直接下级，明细表除外）' %
+                         (getattr(sec, 'name', '单位工程'), self.group_label(),
+                          len(self._groups),
+                          sum(n for _k, _u, _v, n in self._groups)))
+
+    def _on_col_resized(self, col, _old, new):
+        try:
+            title = self.table.horizontalHeaderItem(col).text()
+            self._col_widths[title] = new
+        except Exception:
+            pass
+
+    # ---------------- 导出 / 复制 / 打印 ----------------
+    def copy_to_clipboard(self):
+        if not self._groups:
+            QMessageBox.information(self, APP_NAME, '当前汇总表没有数据。')
+            return
+        QApplication.clipboard().setText(
+            '\n'.join('\t'.join(str(c) for c in row) for row in self._matrix))
+        self.win.status.showMessage('单位工程汇总表已复制到剪贴板', 3000)
+
+    def export_excel(self):
+        if not self._groups:
+            QMessageBox.information(self, APP_NAME, '当前汇总表没有数据。')
+            return
+        sec = getattr(self.win, 'current_section', None)
+        label = self.group_label()
+        name = '%s-%s汇总.xlsx' % (getattr(sec, 'name', '单位工程'), label)
+        path, _ = QFileDialog.getSaveFileName(self, '导出单位工程汇总表', name,
+                                              'Excel 文件 (*.xlsx);;所有文件 (*)')
+        if not path:
+            return
+        if not path.lower().endswith('.xlsx'):
+            path += '.xlsx'
+        try:
+            from openpyxl import Workbook
+            from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
+            from openpyxl.utils import get_column_letter
+            wb = Workbook()
+            ws = wb.active
+            ws.title = (label + '汇总')[:31]
+            thin = Side(style='thin', color='B0B0B0')
+            border = Border(left=thin, right=thin, top=thin, bottom=thin)
+            data = self._matrix
+            ncols = len(data[0])
+            nkeys = len(self.group_fields())
+            ws.append(['%s — %s汇总' % (getattr(sec, 'name', '单位工程'), label)])
+            ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=ncols)
+            ws.cell(row=1, column=1).font = Font(bold=True, size=13)
+            ws.cell(row=1, column=1).alignment = Alignment(horizontal='center')
+            # 第 2 行是表头，第 3 行起才是数据（与分类汇总导出保持一致）
+            for ci, val in enumerate(data[0], start=1):
+                c = ws.cell(row=2, column=ci, value=val)
+                c.font = Font(bold=True)
+                c.fill = PatternFill('solid', fgColor='F0E6C8')
+                c.border = border
+                c.alignment = Alignment(horizontal='center')
+            for ri, row in enumerate(data[1:], start=3):
+                for ci, val in enumerate(row, start=1):
+                    c = ws.cell(row=ri, column=ci, value=val)
+                    c.border = border
+                    c.alignment = Alignment(horizontal=('right' if ci == ncols - 1
+                                                        else 'center' if ci in (1, ncols)
+                                                        else 'left'))
+                    if ri == len(data) + 1:
+                        c.font = Font(bold=True)
+                        c.fill = PatternFill('solid', fgColor='FFF2A8')
+            for ci in range(1, ncols + 1):
+                width = 8 if ci == 1 else (24 if ci <= nkeys + 1 else 14)
+                if ci > nkeys + 1 and ci == ncols:
+                    width = 8
+                ws.column_dimensions[get_column_letter(ci)].width = width
+            ws.freeze_panes = 'A3'
+            wb.save(path)
+        except Exception as e:
+            QMessageBox.critical(self, '导出失败', str(e))
+            return
+        self.win.status.showMessage('已导出：' + os.path.basename(path), 5000)
+        if QMessageBox.question(self, '导出成功', '已生成：\n%s\n\n是否立即打开？' % path,
+                                QMessageBox.Yes | QMessageBox.No,
+                                QMessageBox.No) == QMessageBox.Yes:
+            try:
+                os.startfile(path)
+            except Exception:
+                pass
+
+    def _html(self):
+        from html import escape
+        sec = getattr(self.win, 'current_section', None)
+        title = '%s — %s汇总（直接下级，明细表除外）' % (
+            getattr(sec, 'name', '单位工程'), self.group_label())
+        parts = ['<html><head><meta charset="utf-8"></head><body>',
+                 '<h3 style="text-align:center">%s</h3>' % escape(title),
+                 '<table border="1" cellspacing="0" cellpadding="4" '
+                 'style="border-collapse:collapse;width:100%;">']
+        for ri, row in enumerate(self._matrix):
+            parts.append('<tr>')
+            for cell in row:
+                tag = 'th' if ri == 0 else 'td'
+                style = ('background:#f0e6c8;font-weight:bold;' if ri == 0 else
+                         ('background:#fff2a8;font-weight:bold;' if ri == len(self._matrix) - 1
+                          else ''))
+                parts.append('<%s style="%s">%s</%s>' %
+                             (tag, style, escape(str(cell)), tag))
+            parts.append('</tr>')
+        parts.append('</table></body></html>')
+        return ''.join(parts)
+
+    def _document(self):
+        from PyQt5.QtGui import QTextDocument
+        doc = QTextDocument()
+        doc.setHtml(self._html())
+        return doc
+
+    def print_preview(self):
+        if not self._groups:
+            QMessageBox.information(self, APP_NAME, '当前汇总表没有数据。')
+            return
+        try:
+            from PyQt5.QtPrintSupport import QPrintPreviewDialog
+            from ui_report import localize_print_preview
+        except Exception as e:
+            QMessageBox.warning(self, APP_NAME, '缺少打印组件：%s' % e)
+            return
+        doc = self._document()
+        dlg = QPrintPreviewDialog(self.win.make_printer(), self)
+        dlg.setWindowTitle('打印预览——单位工程汇总表')
+        dlg.paintRequested.connect(doc.print_)
+        localize_print_preview(dlg)
+        dlg.exec_()
+
+    def print_(self):
+        """真实打印：页码范围交给 QTextDocument.print_()（原生框会写回 from/to）。"""
+        if not self._groups:
+            QMessageBox.information(self, APP_NAME, '当前汇总表没有数据。')
+            return
+        try:
+            from PyQt5.QtPrintSupport import QPrintDialog
+        except Exception as e:
+            QMessageBox.warning(self, APP_NAME, '缺少打印组件：%s' % e)
+            return
+        printer = self.win.make_printer()
+        dlg = QPrintDialog(printer, self)
+        dlg.setWindowTitle('打印单位工程汇总表')
+        self.win.prefill_print_dialog(dlg)
+        if dlg.exec_() != QDialog.Accepted:
+            return
+        self._document().print_(printer)
+        self.win.status.showMessage('已发送到打印机：单位工程汇总表', 4000)
+
+
 class SummaryDialog(QDialog):
     """分类汇总弹窗（V3.7.0）。
 
     分类汇总不再常驻右侧，改为独立窗口：右键点单元格、或点 Ribbon 的“数据汇总”
     都会弹出这里；关掉窗口后面板回到原位（隐藏状态）。
+
+    V4.3：补齐窗口控制——顶部有「最大化 / 还原」「返回主窗口」按钮，系统标题栏
+    也带最小化 / 最大化按钮。以前一旦被最大化就没人能还原，主窗口的导航栏
+    （Ribbon、左侧项目树）全被这个窗口挡住，点都没法点。
     """
 
     def __init__(self, win, parent=None):
@@ -2215,17 +2830,88 @@ class SummaryDialog(QDialog):
         self.setWindowTitle('分类汇总')
         self.setMinimumSize(720, 480)
         self.resize(880, 600)
+        # 系统标题栏也要有最小化 / 最大化（还原）按钮
+        try:
+            self.setWindowFlags(self.windowFlags() | Qt.WindowMinimizeButtonHint |
+                                Qt.WindowMaximizeButtonHint)
+        except Exception:
+            pass
         lay = QVBoxLayout(self)
         lay.setContentsMargins(6, 6, 6, 6)
         lay.setSpacing(4)
+
+        # ===== 顶部控制条 =====
+        bar = QHBoxLayout()
+        bar.setSpacing(4)
+        lb = QLabel('分类汇总')
+        lb.setStyleSheet('font-weight:600; color:#4a4020;')
+        bar.addWidget(lb)
+        self.lbl_tip = QLabel('')
+        self.lbl_tip.setStyleSheet('color:#8a8a8a; font-size:9pt;')
+        bar.addWidget(self.lbl_tip, 1)
+        self.btn_max = QPushButton('最大化')
+        self.btn_max.setToolTip('让汇总窗口占满屏幕；再点一次还原')
+        self.btn_max.clicked.connect(self.toggle_max)
+        self.btn_back = QPushButton('返回主窗口')
+        self.btn_back.setToolTip('关掉本窗口并回到主界面（左侧导航与功能区都能用了）')
+        self.btn_back.clicked.connect(self.back_to_main)
+        for b in (self.btn_max, self.btn_back):
+            b.setStyleSheet('QPushButton { padding:3px 7px; font-size:9pt; }')
+            bar.addWidget(b)
+        lay.addLayout(bar)
+
         # 直接把主窗口那块面板搬过来用，刷新、导出、复制都还是同一份数据
         self.panel = win.summary_panel
         self.panel.setParent(self)
         self.panel.btn_fold.setVisible(False)
-        self.panel.btn_max.setVisible(False)
+        # 面板头部的 ⤢ 在弹窗里改为控制本窗口（不再隐藏，用户才有"最大化"入口）
+        try:
+            self.panel.btn_max.clicked.disconnect()
+        except Exception:
+            pass
+        self.panel.btn_max.clicked.connect(self.toggle_max)
+        self.panel.btn_max.setToolTip('最大化 / 还原本汇总窗口')
         lay.addWidget(self.panel, 1)
         self.panel.setVisible(True)
         self.panel.refresh()
+        self._sync_max_btn()
+
+    # ---------------- 窗口控制 ----------------
+    def toggle_max(self):
+        """最大化 / 还原汇总窗口（顶部按钮、面板 ⤢、系统标题栏都走这里）。"""
+        try:
+            if self.isMaximized():
+                self.showNormal()
+            else:
+                self.showMaximized()
+        except Exception:
+            pass
+        self._sync_max_btn()
+
+    def _sync_max_btn(self):
+        """按当前窗口状态刷新按钮文字与提示。"""
+        try:
+            mx = self.isMaximized()
+            self.btn_max.setText('还原' if mx else '最大化')
+            self.panel.btn_max.setText('⤡' if mx else '⤢')
+            self.lbl_tip.setText('已最大化，点「还原」可恢复窗口大小' if mx else '')
+        except Exception:
+            pass
+
+    def changeEvent(self, ev):
+        super().changeEvent(ev)
+        if ev.type() == QEvent.WindowStateChange:
+            self._sync_max_btn()
+
+    def back_to_main(self):
+        """回到主窗口：关掉汇总窗并把主窗口顶到前面（导航栏 / Ribbon 恢复可用）。"""
+        self.hide()
+        try:
+            self.win.showNormal()
+            self.win.raise_()
+            self.win.activateWindow()
+        except Exception:
+            pass
 
     def done(self, result):
         # 汇总面板一直留在窗口里，关闭弹窗只是隐藏它（数据不丢）
@@ -2238,18 +2924,20 @@ class MultiSummaryDialog(QDialog):
     OPS = [('contains', '包含'), ('not_contains', '不包含'), ('eq', '等于'),
            ('ne', '不等于'), ('empty', '为空'), ('not_empty', '不为空')]
 
-    def __init__(self, panel, current=None, parent=None):
+    def __init__(self, panel, current=None, parent=None, fields=None):
         super().__init__(parent or panel)
         self.setWindowTitle('多条件汇总设置')
         self.resize(520, 420)
         self._rows = []
+        # 可选的分组 / 筛选字段：默认内置 5 项；单位工程汇总可传入自定义列
+        self._field_list = list(fields) if fields else list(SummaryPanel.MODES)
         v = QVBoxLayout(self)
 
         gb = QGroupBox('分组字段（至少选一个，可多选）')
         gbl = QVBoxLayout(gb)
         self.checks = {}
         grid = QGridLayout()
-        for i, (key, label) in enumerate(SummaryPanel.MODES):
+        for i, (key, label) in enumerate(self._field_list):
             cb = QCheckBox(label)
             self.checks[key] = cb
             grid.addWidget(cb, i // 3, i % 3)
@@ -2291,7 +2979,8 @@ class MultiSummaryDialog(QDialog):
         v.addWidget(bb)
 
         current = current or {}
-        for key in (current.get('fields') or [panel.mode_key()]):
+        default_field = self._default_field(panel)
+        for key in (current.get('fields') or [default_field]):
             if key in self.checks:
                 self.checks[key].setChecked(True)
         self.rb_all.setChecked(current.get('match_all', True))
@@ -2301,6 +2990,19 @@ class MultiSummaryDialog(QDialog):
         if not self._rows:
             self.add_condition()
 
+    def _default_field(self, panel):
+        """默认勾选的分组字段（取调用方的当前分组列）。"""
+        for name in ('mode_key', 'group_key'):
+            fn = getattr(panel, name, None)
+            if callable(fn):
+                try:
+                    key = fn()
+                    if key:
+                        return key
+                except Exception:
+                    pass
+        return 'code'
+
     def add_condition(self, field='code', op='contains', value=''):
         """添加一行筛选条件；信号连 lambda 时前三个参数有默认值，可直接当槽用。"""
         row = QWidget()
@@ -2308,7 +3010,7 @@ class MultiSummaryDialog(QDialog):
         h.setContentsMargins(0, 0, 0, 0)
         h.setSpacing(4)
         cb_field = QComboBox()
-        for key, label in SummaryPanel.MODES:
+        for key, label in self._field_list:
             cb_field.addItem(label, key)
         idx = cb_field.findData(field if isinstance(field, str) else 'code')
         cb_field.setCurrentIndex(max(0, idx))
@@ -3797,6 +4499,8 @@ class MainWindow(QMainWindow):
                     ('导入表格', 'open', self.import_table, '', False),
                 ]),
                 ('编辑', [
+                    # V4.4：导航栏显示 / 收起（工作区左缘也有常驻开关，不会找不到）
+                    ('导航栏', 'settings', self.toggle_nav_panel, '', False),
                     # V3.7.6：插入/添加计算式、插入明细、插入/添加分部
                     #         从工具栏取消（导航栏右键已有这些功能）；
                     #         F9 快捷键保留（窗口级 QShortcut，见下）
@@ -3868,6 +4572,13 @@ class MainWindow(QMainWindow):
                     self.btn_new = b
                     b.setToolTip('新建工程（Ctrl+N）—— 可填工程名称、建设单位、施工单位、'
                                  '设计单位、编制日期')
+                elif b.text() == '导航栏':
+                    # V4.4：可勾选按钮，勾着=显示导航栏
+                    self.btn_nav_ribbon = b
+                    b.setCheckable(True)
+                    b.setChecked(True)
+                    b.setToolTip('显示 / 收起左侧导航栏（项目结构）\n'
+                                 '收起后仍可用工作区左缘的 ▶ 按钮展开')
         # 说明：撤销/恢复/查找的快捷键由工具条按钮自己注册（Ctrl+Z / Ctrl+Y / Ctrl+F），
         # 这里是窗口级生效的，不需要再额外注册 QShortcut（重复注册会互相冲突）。
 
@@ -4126,8 +4837,16 @@ class MainWindow(QMainWindow):
         rv = QVBoxLayout(right)
         rv.setContentsMargins(0, 0, 0, 0)
         rv.setSpacing(0)
+        # V4.4：工作区左缘的常驻窄条——导航栏开关永远在同一个位置，
+        #        收起导航后（哪怕正在单位工程汇总视图、公式栏被隐藏）也能一键展开
+        right_row = QHBoxLayout()
+        right_row.setContentsMargins(0, 0, 0, 0)
+        right_row.setSpacing(0)
+        rv.addLayout(right_row)
+        self.nav_strip = NavStrip(self.toggle_nav_panel)
+        right_row.addWidget(self.nav_strip)
         right_split = QSplitter(Qt.Vertical)
-        rv.addWidget(right_split, 1)
+        right_row.addWidget(right_split, 1)
         right_split.addWidget(form_frame)
 
         table_host = QWidget()
@@ -4210,6 +4929,10 @@ class MainWindow(QMainWindow):
 
         # 表格直接占满右侧（备注就在表格“备注”列里编辑）
         th.addWidget(self.table, 1)
+        # V4.2：选中单位工程节点时改用汇总视图（带自动序号、导出/复制/打印）
+        self.unit_summary = UnitSummaryWidget(self)
+        th.addWidget(self.unit_summary, 1)
+        self.unit_summary.hide()
         right_split.addWidget(table_host)
         right_split.setStretchFactor(0, 0)
         right_split.setStretchFactor(1, 1)
@@ -4232,6 +4955,7 @@ class MainWindow(QMainWindow):
         main_split.setStretchFactor(1, 1)
         # 记住用户拖出来的宽度，收起 / 展开时复原
         self._nav_folded = False
+        self._sync_nav_strip()
         self._sum_folded = True          # 汇总已是弹窗，视作“已收起”
         self._sum_max = False
         self._const_folded = False
@@ -4410,12 +5134,36 @@ class MainWindow(QMainWindow):
         if which == 'nav':
             self.left_frame.setVisible(not hide)
             self.btn_nav_open.setVisible(hide)      # 收起后工作区左上角出现“展开导航”
+            self._sync_nav_strip()
             self._sync_main_sizes()
+            try:
+                self.status.showMessage(
+                    '已收起左侧导航栏：点工作区左缘的 ▶ 按钮（或 Ribbon「导航栏」）可随时展开'
+                    if hide else '已展开左侧导航栏', 6000)
+            except Exception:
+                pass
         else:
             self.const_box.setVisible(not hide)
             self.const_strip.set_folded(hide)
             self._sync_left_sizes()
         return True
+
+    def _sync_nav_strip(self):
+        """工作区左缘的导航开关条跟着导航状态走（收起时显示 ▶）。"""
+        strip = getattr(self, 'nav_strip', None)
+        if strip is not None:
+            strip.set_state(bool(self._nav_folded))
+        btn = getattr(self, 'btn_nav_ribbon', None)
+        if btn is not None:
+            try:
+                btn.setChecked(not self._nav_folded)
+            except Exception:
+                pass
+
+    def toggle_nav_panel(self):
+        """导航栏显示 / 收起切换（工作区左缘窄条、Ribbon 按钮共用）。"""
+        self.fold_nav(not self._nav_folded)
+        return self._nav_folded
 
     def fold_nav(self, hide=None):
         """收起 / 展开左侧导航栏。"""
@@ -4636,8 +5384,9 @@ class MainWindow(QMainWindow):
         <ul>
         <li>最上面是自绘标题栏：左端显示<b>橘黄底的软件图标</b> → 软件名与版本 → 工程文件名称 → <code>[文件存放详细地址]</code>；不再显示常用函数快捷按钮；最右端是最小化 / 最大化 / 关闭。未保存的工程显示 <code>[未保存]</code>。</li>
         <li>标题栏空白处按住可拖动窗口，双击最大化 / 还原；鼠标移到窗口边缘可拖拽调整大小。路径过长时中间省略，鼠标悬停可看全路径。</li>
-        <li>Ribbon 三个页签：<b>计算书编辑</b>、<b>数据导出</b>、<b>关于产品</b>。「计算书编辑」按成熟工程量软件的版面分为 <b>文件 / 编辑 / 图纸 / 层级 / 剪贴板 / 表格 / 选项</b> 组：文件（新建、打开、保存、另存为、最近打开、备份目录、导入表格）；编辑（项目选项、用分部打新、分部打断——<b>插入 / 添加计算式、插入明细、插入 / 添加分部等按钮 V3.7.6 起取消，这些功能导航栏右键都有</b>，F9 快捷键保留）；图纸（图纸截图、图纸预览开关）；层级（上移、下移、升级、降级、特殊字符——注释标签移到单元格右键）；剪贴板（复制、剪切、删除、粘贴、恢复、撤销）；表格（查找替换、层级设置、表格字体、格式刷、排序、筛选、清除筛选）；选项（选项配置）。<b>「公式编辑」页签已取消</b>，内置函数改由「插入函数」面板调用；「查看公式」「重算」按钮也已取消；F4–F7 插入括号的快捷键仍可用。</li>
+        <li>Ribbon 三个页签：<b>计算书编辑</b>、<b>数据导出</b>、<b>关于产品</b>。「计算书编辑」按成熟工程量软件的版面分为 <b>文件 / 编辑 / 图纸 / 层级 / 剪贴板 / 表格 / 选项</b> 组：文件（新建、打开、保存、另存为、最近打开、备份目录、导入表格）；编辑（<b>导航栏</b>、项目选项、用分部打新、分部打断——<b>插入 / 添加计算式、插入明细、插入 / 添加分部等按钮 V3.7.6 起取消，这些功能导航栏右键都有</b>，F9 快捷键保留）；图纸（图纸截图、图纸预览开关）；层级（上移、下移、升级、降级、特殊字符——注释标签移到单元格右键）；剪贴板（复制、剪切、删除、粘贴、恢复、撤销）；表格（查找替换、层级设置、表格字体、格式刷、排序、筛选、清除筛选）；选项（选项配置）。<b>「公式编辑」页签已取消</b>，内置函数改由「插入函数」面板调用；「查看公式」「重算」按钮也已取消；F4–F7 插入括号的快捷键仍可用。</li>
         <li>左侧为项目结构树与常量框，右侧为公式辅助框、快捷操作行和工作区表格。分割条上有小箭头按钮可收起 / 展开（宽度会被记住）。<b>分类汇总不再是右侧常驻面板，改为弹窗</b>：在单元格里右键 →「分类汇总…」即可弹出（汇总开着也能继续编辑表格）。</li>
+        <li><b>导航栏开关永远在（V4.4）</b>：工作区<b>左缘有一条常驻窄条</b>，上面就是导航栏开关——展开时显示 <code>◀</code>（收起导航），收起后显示 <code>▶</code>（展开导航）。<b>这条窄条在任何视图下都在</b>（包括单位工程汇总视图，那种视图会把公式辅助栏整条藏起来），所以导航收起后<b>随时能再打开</b>，不会再出现“窗口最大化后找不到导航栏”。Ribbon「编辑」组还有 <b>「导航栏」</b>按钮（可勾选，勾着＝显示导航栏），两种入口效果一样。</li>
         <li><b>「关于产品」页签（V3.7.2 新增入群反馈）</b>：有「使用说明 / 关于产品 / <b>入群反馈</b>」三个按钮。点「入群反馈」弹出 QQ 群卡片（群号 <b>763124073</b>），<b>群号自动复制到剪贴板</b>，也可一键尝试拉起 QQ 加群；加群可以反馈问题、提建议、获取最新版本。</li>
         <li><b>序号等列输入也居中（V3.7.3）</b>：序号 / 编号 / 单位 / 工程量默认居中的列，<b>双击进入输入时文字同样居中显示</b>（以前编辑框一律靠左，看着像没居中）。</li>
         <li><b>插入 / 添加行列可自定义数量（V3.7.3）</b>：插入行、添加计算式、添加列时都会先弹一个小对话框问<b>数量</b>（默认 1，<b>记住上次输入的值</b>，直接回车就是上次的数量）；一次添加多列时列名自动编号。最大行列数与 WPS 表格一致（1048576 行 × 16384 列）。</li>
@@ -4680,7 +5429,7 @@ class MainWindow(QMainWindow):
         <li><b>列宽 / 行高</b>：<b>默认自适应</b>——列宽按内容计算并铺满窗口，行高按内容撑高（长公式 / 长备注自动换行），无需手点。手动拖过列宽后自动列宽会关闭，可在左上角角标右键重新勾选「自动列宽 / 自动行高」恢复；把鼠标移到两列（或两行）表头之间的分隔线上<b>双击</b>可只自适应该列 / 该行。</li>
         <li><b>冻结窗格</b>：右键行号「冻结至本行」/ 列头「冻结至本列」，可同时冻结行列；<b>滚动时冻结线以上 / 以左的部分始终固定显示，以下 / 以右的部分随鼠标滚动</b>（V3.7.4 修复：以前编辑过单元格后冻结区会消失不再显示）；冻结区右键也能弹出单元格菜单，双击冻结区单元格仍可编辑；左上角右键「取消全部冻结」。设置随工程保存。</li>
         <li><b>撤销 / 恢复、查找</b>：Ctrl+Z 撤销、Ctrl+Y 恢复，逐字输入公式只算一步；Ctrl+F 打开查找，可按编号 / 项目名称 / 单位 / 部位 / 计算公式 / 备注或「全部字段」搜索，回车逐个定位到对应行。<b>V3.7.1</b>：在导航栏上做完操作后撤销，<b>会回到操作前的那个节点</b>，不会跳到根目录。</li>
-        <li><b>拖动填充柄（自动序号，V3.7.1 修正）</b>：选中单元格后右下角有蓝色小方块，按住向下 / 向右拖动即自动填充序号（纯数字等差递增、尾号数字自动进位、汉字 / 公式循环复制）。拖动时的<b>虚线框正好罩住要填充的区域</b>（以前会宽出一格，看着像拉到旁边的单元格），目标区还铺了一层淡蓝底色，一眼能看出要填到哪里。</li>
+        <li><b>拖动填充柄（自动序号，V3.7.1 修正；V4.1 支持自动加行）</b>：选中单元格后右下角有蓝色小方块，按住向下 / 向右拖动即自动填充序号（纯数字等差递增、尾号数字自动进位、汉字 / 公式循环复制）。拖动时的<b>虚线框正好罩住要填充的区域</b>（以前会宽出一格，看着像拉到旁边的单元格），目标区还铺了一层淡蓝底色，一眼能看出要填到哪里。<b>拖过表格最后一行</b>时虚框继续往下面延伸，松手后自动在末尾追加相应行数并填好数据（一次最多 500 行，Ctrl+Z 可撤销）。</li>
         <li><b>排序 / 筛选</b>：右键或工具栏「计算书编辑」可排序、筛选——先在窗口里选<b>筛选列</b>（选哪列就筛哪列，V3.5 修复）再选条件（等于 / 包含 / 数字比较 / 正则 / 按填充颜色等），只隐藏不删数据、刷新后保持、编辑数据后立即重算；比较时自动统一全 / 半角与空格（V3.6），例如 <code>Ａ－００１</code> 可用 <code>A-001</code> 筛到；内容留空或正则写错会明确提示。<b>取消筛选</b>有三个入口：筛选窗口内点「清除筛选」、工具栏「清除筛选」、右键「清除筛选」，点后立即恢复显示全部行。</li>
         <li><b>选区统计与缩放</b>：单选 / 多选「工程量」列的数据，状态栏右下角实时显示 <code>求和=… 平均值=… 计数=…</code>（WPS 式，取代原来的固定小计）；多选 / 全选后普通左键点某格会恢复为只选这一格（V3.6），统计只算真正选中的格子。在表格上按住 <b>Ctrl + 鼠标滚轮</b> 可放大 / 缩小单元格显示（字号与手动行高列宽同比例，6–24 号字），不按 Ctrl 时滚轮照常滚动。</li>
         <li><b>默认列与列宽（V3.6；V3.7.9 调整为 9 列）</b>：默认列顺序为 序号 / 清单编号 / 项目名称 / 计量单位 / 工程量 / 计算公式 / 备注 / <b>图纸</b> / 不计（V3.7.9 起「图纸编号」列从默认列取消——老工程打开时自动迁移一次，<code>图纸编号</code> 数据不丢，需要时表头右键可自己加回）。列宽默认固定，新增列或刷新表格不会打乱已调好的宽度；表头右键可增删 / 重命名列、设置列宽。<b>序号 / 清单编号 / 计量单位 / 工程量以及新增列默认居中对齐</b>，仍可右键单独改对齐；老工程打开时列序自动迁移一次（之后自己拖动的列序不会被覆盖）。</li>
@@ -4715,9 +5464,10 @@ class MainWindow(QMainWindow):
 
         <h3 style="color:#2f5597;">八、分类汇总</h3>
         <ul>
-        <li><b>分类汇总改为弹窗（V3.7.0）</b>：不再常驻右侧，<b>在单元格里右键 →「分类汇总…」</b>即可弹出（Ribbon「数据汇总」按钮同样可以调出）。弹窗是非模态的，汇总开着也能继续编辑表格，关掉再开数据还在。</li>
+        <li><b>分类汇总改为弹窗（V3.7.0）</b>：不再常驻右侧，<b>在单元格里右键 →「分类汇总…」</b>即可弹出（Ribbon「数据汇总」按钮同样可以调出）。弹窗是非模态的，汇总开着也能继续编辑表格，关掉再开数据还在。<b>V4.1 新增范围「仅当前单位工程的下一级（排除明细表）」</b>：选中单位工程节点或其下级表后勾选，只汇总它的直接下级计算书，更深层明细表不参与，分组仍按窗口上方设定的列名；查看报表的分类汇总也用同一口径。<b>V4.2</b>：直接选中单位工程节点时，右侧工作区本身就显示这张汇总表（第一列自动序号），顶部可切换汇总方式，并可导出表格 / 复制 / 打印预览 / 打印；切回分部节点恢复可编辑工作表。</li>
         <li>弹窗里可按 <b>编号 / 项目名称 / 部位 / 分部 / 单位</b> 把计算数据分类合计，同名同单位的多行自动累加；勾「仅当前分部（含下级）」只统计左侧选中分部，点「刷新」重算，「导出」存 Excel，「复制」可直接贴到 WPS。</li>
-        <li>点「多条件…」可用多字段分组（如「部位 + 单位」组合）和多条筛选（字段 + 包含 / 不包含 / 等于 / 不等于 / 为空 / 不为空 + 关键词），条件之间可选满足全部（AND）或满足任一（OR）；点「单条件」切回。</li>
+        <li>点「多条件…」可用多字段分组（如「部位 + 单位」组合）和多条筛选（字段 + 包含 / 不包含 / 等于 / 不等于 / 为空 / 不为空 + 关键词），条件之间可选满足全部（AND）或满足任一（OR）；点「单条件」切回。<b>V4.3</b>：单位工程工作区的那张汇总表也支持同一套多条件（还能选自定义列做分组）；汇总窗口顶部新增<b>「最大化 / 还原」与「返回主窗口」</b>按钮，系统标题栏也补上最小化 / 最大化键，窗口被最大化后照样能一键回到主界面（左侧导航与 Ribbon 恢复可用）；「查看报表」窗口同样补了这套控制。</li>
+        <li><b>排序：分组里带「分部」时，分部顺着下来（V5.0）</b>：只要分组字段里勾了「分部」，汇总结果就<b>先按分部在树里的先后排列</b>（1罐基 → 2火车卸车泵棚 → 3防火堤隔堤），<b>同一分部的组连成一整块</b>，块内再按其余字段（编号等）自然序排；没有「分部」维度时才维持按合计金额降序。以前一律按金额降序，同一分部被拆得到处都是，看着「分部的汇总量是乱的」。</li>
         <li>汇总表单元格可多选并按 Ctrl+C 复制；所有列宽均可直接拖动（含项目名称列）并被记住，表头 / 角标 / 单元格右键可设列宽、行高、自适应、复制整表、导出。</li>
         </ul>
 
@@ -4860,16 +5610,16 @@ class MainWindow(QMainWindow):
         return self.project.columns
 
     def calc_letters(self):
-        """列 key → 单元格地址字母（工程量列固定 A，其余可计算列依次 B、C…）。"""
+        """列 key → 单元格地址字母（V3.10：按物理列 A/B/C…，每列都有）。"""
         return column_letters(self._cols())
 
     def calc_keys(self):
-        """能写公式、也能被引用的列 key 集合。"""
+        """所有有地址的列 key（含标识列——它们能被引用，但不能写公式）。"""
         return set(k for k, v in self.calc_letters().items() if v)
 
     def _col_is_formula_cell(self, key):
-        """该列能否写公式（V3.9：除「工程量」结果列外的可计算列都可以）。"""
-        if not key or key in ('value', 'no_count', 'img'):
+        """该列能否写公式（工程量结果列与标识列都不行，其余列可以）。"""
+        if not key or key == 'value' or key in NON_CALC_COLUMNS:
             return False
         return key in self.calc_keys()
 
@@ -5017,9 +5767,36 @@ class MainWindow(QMainWindow):
         # V3.7.4：角标右键菜单惰性接线（角标按钮可能此刻才被 Qt 创建出来）
         if getattr(self, 'table', None) is not None:
             self._ensure_corner_menu()
-        self.lbl_status.setText('%s：%d 行' % (sec.name, len(sec.rows)))
+        if self._unit_summary_active():
+            # V4.2：单位工程节点的工作区直接显示下级汇总表（只读，自动序号）
+            self.table.hide()
+            if getattr(self, 'letter_bar', None) is not None:
+                self.letter_bar.hide()
+            if getattr(self, 'formula_dock', None) is not None:
+                self.formula_dock.hide()
+            if getattr(self, 'unit_summary', None) is not None:
+                self.unit_summary.show()
+                self.unit_summary.refresh()
+            self.lbl_status.setText('%s：单位工程汇总（按%s，仅直接下级，明细表除外）'
+                                    % (sec.name, self.unit_summary.group_label()))
+        else:
+            if getattr(self, 'unit_summary', None) is not None:
+                self.unit_summary.hide()
+            self.table.show()
+            if getattr(self, 'letter_bar', None) is not None:
+                self.letter_bar.show()
+            if getattr(self, 'formula_dock', None) is not None:
+                self.formula_dock.show()
+            self.lbl_status.setText('%s：%d 行' % (sec.name, len(sec.rows)))
         self.update_selection_stats()
         self.schedule_summary_refresh()
+
+    def _unit_summary_active(self):
+        """当前选中的是不是「单位工程」节点（它的工作区显示汇总表）。"""
+        sec = getattr(self, 'current_section', None)
+        if sec is None or getattr(self, 'unit_summary', None) is None:
+            return False
+        return unit_level_section(sec) is sec
 
     def col_key(self, col):
         """逻辑列索引 -> 列 key。
@@ -7688,11 +8465,16 @@ class MainWindow(QMainWindow):
     def copy_cells(self, *args, cut=False):
         """按选中区域复制（矩形区域按区域，非矩形退回整行复制）。
 
+        V4.2：单位工程工作区显示的是汇总表，Ctrl+C / 复制按钮复制整张汇总表。
+
         V3.4：表头拖动只改视觉顺序、不改逻辑列；这里按**表头视觉顺序**输出
         每行的 TSV，避免移动列后复制到 WPS 出现错列。
         V3.3：整行复制时同时写结构化剪贴板，粘贴到任意位置会**插入行**并把
         原有数据顺延，不覆盖已有数据；普通框选仍写 TSV，兼容 WPS / Excel。
         """
+        if self._unit_summary_active():
+            self.unit_summary.copy_to_clipboard()
+            return
         idxs = self.table.selectedIndexes()
         if not idxs:
             return
@@ -7746,6 +8528,20 @@ class MainWindow(QMainWindow):
         tr0, tr1, tc0, tc1 = tgt
         vertical = (tc0, tc1) == (c0, c1)       # 纵向填充
         self.push_undo('拖动填充')
+        added = 0
+        if vertical and tr1 >= len(sec.rows):
+            # 拖过最后一行：先把模型行补齐，再按自动序号填进去（V4.1）。
+            cap = min(MAX_FILL_NEW_ROWS, MAX_ROWS - len(sec.rows))
+            want = min(tr1, r1 + cap)           # 目标末行受一次填充上限约束
+            need = max(0, want + 1 - len(sec.rows))
+            unit = self._auto_unit_for(sec)
+            for _ in range(need):
+                row = Row()
+                if unit:
+                    row.unit = unit
+                sec.rows.append(row)
+            tr1 = want
+            added = need
         n = 0
         if vertical:
             offsets = list(range(tr0 - r0, tr1 - r0 + 1))
@@ -7783,7 +8579,10 @@ class MainWindow(QMainWindow):
         self.project.recalc()
         self.refresh_table()
         self._dirty = True
-        self.status.showMessage('已填充 %d 个单元格（Ctrl+Z 可撤销）' % n, 4000)
+        msg = '已填充 %d 个单元格' % n
+        if added:
+            msg += '，末尾自动增加 %d 行' % added
+        self.status.showMessage(msg + '（Ctrl+Z 可撤销）', 4000)
 
     def _fill_write(self, row, key, val, src_row):
         """把填充值写进单元格（no_count 用布尔，其它用文本）。"""
@@ -7825,6 +8624,12 @@ class MainWindow(QMainWindow):
 
     def cancel_painter(self):
         """Esc：取消格式刷 / 清除填充预览。"""
+        if getattr(self.table, '_fill_drag', None) is not None:
+            orig = getattr(self.table, '_fill_orig_rows', None)
+            self.table._fill_drag = None
+            self.table._fill_orig_rows = None
+            if orig is not None:
+                self.table.setRowCount(orig)
         if self._paint_fmt is not None:
             self._paint_fmt = None
             self.table.paint_mode = False
@@ -8429,6 +9234,9 @@ class MainWindow(QMainWindow):
 
     # ---------------- 报表 ----------------
     def export_excel(self):
+        if self._unit_summary_active():      # V4.2：单位工程工作区导出的是汇总表
+            self.unit_summary.export_excel()
+            return
         self.project.recalc()
         path, _ = QFileDialog.getSaveFileName(self, '导出 Excel', self.project.name + '-工程量计算书.xlsx',
                                               'Excel 文件 (*.xlsx);;所有文件 (*)')
@@ -8444,6 +9252,9 @@ class MainWindow(QMainWindow):
 
     def export_wps(self):
         """导出 WPS 表格（.xlsx，WPS 表格原生支持，可再另存为 .et）。"""
+        if self._unit_summary_active():
+            self.unit_summary.export_excel()
+            return
         self.project.recalc()
         path, _ = QFileDialog.getSaveFileName(
             self, '导出 WPS 表格', self.project.name + '-工程量计算书.xlsx',
@@ -8810,6 +9621,9 @@ class MainWindow(QMainWindow):
 
     def print_preview(self):
         """切到报表页并刷新纸张预览（页边距可直接拖动调整）。"""
+        if self._unit_summary_active():      # 单位工程工作区：预览汇总表
+            self.unit_summary.print_preview()
+            return
         self.preview_pane.refresh()
         self.tabs.setCurrentIndex(1)
 
@@ -8858,6 +9672,9 @@ class MainWindow(QMainWindow):
 
     def print_report(self):
         """连系统打印机真实打印（Ctrl+P）：每一页都带表头。"""
+        if self._unit_summary_active():      # 单位工程工作区：打印汇总表
+            self.unit_summary.print_()
+            return
         try:
             from PyQt5.QtPrintSupport import QPrintDialog
             from PyQt5.QtGui import QPainter
@@ -9979,6 +10796,13 @@ class MainWindow(QMainWindow):
         except Exception:
             return False
 
+    def summary_scope_unit_next(self):
+        """汇总弹窗里“仅当前单位工程的下一级”的勾选状态（查看报表也要用）。"""
+        try:
+            return bool(self.summary_panel.only_next.isChecked())
+        except Exception:
+            return False
+
     def schedule_summary_refresh(self):
         """数据变化后延时刷新汇总（弹窗开着才刷）。"""
         if not hasattr(self, 'summary_panel') or getattr(self, '_sum_folded', True):
@@ -9992,6 +10816,11 @@ class MainWindow(QMainWindow):
     def _refresh_summary_now(self):
         try:
             self.summary_panel.refresh()
+        except Exception:
+            pass
+        try:
+            if self._unit_summary_active():
+                self.unit_summary.refresh()
         except Exception:
             pass
 
