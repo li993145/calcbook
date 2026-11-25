@@ -606,8 +606,11 @@ class Project:
                             total += descendant.total()
                 return total
 
-            # 迭代求解：每遍按行顺序重算，值不再变化即收敛
-            max_pass = min(max(4, n + 2), 40)
+            # 迭代求解：每遍按行顺序重算，值不再变化即收敛。
+            # 上限必须随行数增长——反向引用链（本行=下一行+1）每遍只往前
+            # 传播一行，n 行就要 n 遍；写死 40 会让 45 行以上的链条算不完。
+            # 循环引用不会收敛，跑满上限即停（不崩、不无限循环）。
+            max_pass = min(max(4, n + 3), 500)
             for _pass in range(max_pass):
                 before = dict(values)
                 for idx, row in enumerate(rows):
